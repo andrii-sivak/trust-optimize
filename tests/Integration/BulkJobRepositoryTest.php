@@ -154,4 +154,18 @@ class BulkJobRepositoryTest extends WP_UnitTestCase {
 		$this->assertEqualsWithDelta( time(), strtotime( $row['finished_at'] . ' UTC' ), 5 );
 		$this->assertEqualsWithDelta( time(), strtotime( $row['updated_at'] . ' UTC' ), 5 );
 	}
+
+	public function test_touch_and_pause_unfinished_write_utc() {
+		$this->set_offset( 3 );
+		$touched = $this->jobs->create( 'library' );
+		$id      = $touched->get_id();
+		$this->age( $id, DAY_IN_SECONDS );
+
+		$this->jobs->touch( $id );
+		$this->assertEqualsWithDelta( time(), strtotime( $this->row( $id )['updated_at'] . ' UTC' ), 5 );
+
+		$this->age( $id, DAY_IN_SECONDS );
+		$this->jobs->pause_unfinished( 'deactivated' );
+		$this->assertEqualsWithDelta( time(), strtotime( $this->row( $id )['updated_at'] . ' UTC' ), 5 );
+	}
 }
