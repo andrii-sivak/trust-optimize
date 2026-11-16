@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The Documentation link on the settings page, the plugin and author URIs and the link in `readme.txt` point to the renamed GitHub account; the old author profile link returned 404.
+
 ## [1.0.0] - 2026-10-05
 
 ### Added

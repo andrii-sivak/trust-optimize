@@ -9,13 +9,13 @@
  *
  * @wordpress-plugin
  * Plugin Name:       TrustOptimize
- * Plugin URI:        https://github.com/Andrey-Sivak/trust-optimize
+ * Plugin URI:        https://github.com/andrii-sivak/trust-optimize
  * Description:       Converts WordPress image sizes to WebP and AVIF and serves them through picture elements.
  * Version:           1.0.0
  * Requires at least: 6.5
  * Requires PHP:      8.0
  * Author:            Andrii Sivak
- * Author URI:        https://github.com/Andrey-Sivak
+ * Author URI:        https://github.com/andrii-sivak
  * Text Domain:       trust-optimize
  * License:           GPL v2 or later
  * License URI:       http://www.gnu.org/licenses/gpl-2.0.txt

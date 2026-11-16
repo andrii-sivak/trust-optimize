@@ -15,7 +15,7 @@ if ( ! defined( 'WPINC' ) ) {
 	<h1><?php echo esc_html( get_admin_page_title() ); ?></h1>
 
 	<p class="trust-optimize-subtitle">
-		<a href="https://github.com/Andrey-Sivak/trust-optimize#readme" target="_blank" rel="noopener"><?php esc_html_e( 'Documentation', 'trust-optimize' ); ?></a>
+		<a href="https://github.com/andrii-sivak/trust-optimize#readme" target="_blank" rel="noopener"><?php esc_html_e( 'Documentation', 'trust-optimize' ); ?></a>
 	</p>
 
 	<?php settings_errors(); ?>

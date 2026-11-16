@@ -180,4 +180,4 @@ First public release.
 == Development ==
 
 TrustOptimize is developed on GitHub. If you want to contribute, please visit:
-https://github.com/Andrey-Sivak/trust-optimize
+https://github.com/andrii-sivak/trust-optimize
