@@ -310,10 +310,7 @@ class ImageCleanupService {
 			);
 		}
 
-		wp_delete_file( $path );
-
-		// wp_delete_file() returns nothing before WordPress 6.7: judge by the file system.
-		if ( file_exists( $path ) ) {
+		if ( ! wp_delete_file( $path ) ) {
 			return array(
 				'status' => 'failed',
 				'reason' => 'delete_failed',
