@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ['8.0', '8.4']
+        php: ['8.0', '8.5']
     env:
       COMPOSER_PROCESS_TIMEOUT: 0
     steps:
@@ -49,9 +49,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { php: '8.0', wp: '6.5', db: 'mariadb:10.6' }
-          - { php: '8.4', wp: 'latest', db: 'mariadb:10.6' }
-          - { php: '8.0', wp: '6.5', db: 'mysql:5.7' }
+          - { php: '8.0', wp: '7.0', db: 'mariadb:10.6' }
+          - { php: '8.5', wp: 'latest', db: 'mariadb:10.6' }
+          - { php: '8.0', wp: '7.0', db: 'mysql:5.7' }
     services:
       db:
         image: ${{ matrix.db }}
@@ -87,7 +87,10 @@ jobs:
           echo "WP_CORE_DIR=$RUNNER_TEMP/wp" >> "$GITHUB_ENV"
       - name: Pin wp-phpunit to the downloaded core version
         run: |
-          lib_version="$(wp core version --path="$WP_CORE_DIR" | cut -d. -f1,2)"
+          # WP-CLI can print PHP 8.5 deprecation notices to stdout before the version, so keep the last line that looks like a version.
+          core_version="$(wp core version --path="$WP_CORE_DIR" | grep -E '^[0-9]+\.[0-9]+' | tail -n 1 || true)"
+          if [ -z "$core_version" ]; then echo "Could not read the WordPress version from $WP_CORE_DIR" >&2; exit 1; fi
+          lib_version="$(echo "$core_version" | cut -d. -f1,2)"
           composer require --dev --no-interaction --with-all-dependencies "wp-phpunit/wp-phpunit:${lib_version}.*"
       - name: Create test database
         run: mysql --protocol=tcp -h 127.0.0.1 -uroot -proot -e "CREATE DATABASE IF NOT EXISTS wordpress_test"

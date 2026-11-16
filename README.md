@@ -16,7 +16,7 @@ Converts the image sizes WordPress generates into WebP and AVIF and serves them 
 ## Requirements
 
 - PHP 8.0 or higher
-- WordPress 6.5 or higher
+- WordPress 7.0 or higher
 - MySQL 5.7 or higher, or MariaDB 10.3 or higher
 - GD or Imagick with WebP (and optionally AVIF) support
 
@@ -50,9 +50,9 @@ Uninstall on a large multisite network: the web request cleans every site with a
 tools/bin/composer install
 tools/bin/composer phpcs
 tools/bin/test unit 8.0
-tools/bin/test integration 8.0 6.5
-tools/bin/test integration 8.4 latest
-WP_MULTISITE=1 tools/bin/test integration 8.0 6.5 "--group ms-required"
+tools/bin/test integration 8.0 7.0
+tools/bin/test integration 8.5 latest
+WP_MULTISITE=1 tools/bin/test integration 8.0 7.0 "--group ms-required"
 ```
 
 ## Release

@@ -9,13 +9,13 @@ Prerequisites: the stand is running (`docker compose up -d`) and tool images are
 | `tools/bin/compose <args>` | `docker compose` against the stand |
 | `tools/bin/composer <args>` | composer in the PHP 8.0 container (minimum supported platform) |
 | `tools/bin/wp <args>` | WP-CLI against the stand site (`/var/www/html`) |
-| `tools/bin/test <unit\|integration> <8.0\|8.4> [wp-version\|latest]` | PHPUnit in the PHP 8.0 / 8.4 container |
+| `tools/bin/test <unit\|integration> <8.0\|8.5> [wp-version\|latest]` | PHPUnit in the PHP 8.0 / 8.5 container |
 
-## Container facts (checked 2026-10-02)
+## Container facts (checked 2026-11-16)
 
-| | `tools-php80` | `tools-php84` |
+| | `tools-php80` | `tools-php85` |
 |---|---|---|
-| PHP | 8.0.30 | 8.4.26 |
+| PHP | 8.0.30 | 8.5.12 |
 | `gd` `imagewebp()` | yes | yes |
 | `gd` `imageavif()` | **no** | yes |
 | Imagick WEBP / AVIF | yes / yes | yes / yes |
