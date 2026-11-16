@@ -1,7 +1,7 @@
 === TrustOptimize ===
 Contributors: andreysivak
 Tags: webp, avif, images, performance, optimization
-Requires at least: 6.5
+Requires at least: 7.0
 Tested up to: 7.1
 Requires PHP: 8.0
 Stable tag: 1.0.0
@@ -31,7 +31,7 @@ Variants are stored next to the original and named after it with the format appe
 = Requirements =
 
 * PHP 8.0 or newer
-* WordPress 6.5 or newer
+* WordPress 7.0 or newer
 * MySQL 5.7 or newer, or MariaDB 10.3 or newer
 * GD or Imagick with WebP (and optionally AVIF) support
 

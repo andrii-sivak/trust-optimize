@@ -24,7 +24,7 @@
     <rule ref="PHPCompatibility"/>
 
     <!-- Rules: WordPress Coding Standards -->
-    <config name="minimum_supported_wp_version" value="6.5"/>
+    <config name="minimum_supported_wp_version" value="7.0"/>
     <rule ref="WordPress">
         <!-- Exclude rules that might be too strict -->
         <exclude name="WordPress.Files.FileName.InvalidClassFileName"/>
@@ -50,6 +50,6 @@
         </properties>
     </rule>
 
-    <!-- Make sure WordPress functions are safe for installations before WP 6.5 -->
-    <config name="minimum_wp_version" value="6.5"/>
+    <!-- Make sure WordPress functions are safe for installations before WP 7.0 -->
+    <config name="minimum_wp_version" value="7.0"/>
 </ruleset>
