@@ -312,7 +312,7 @@ class ImageCleanupService {
 
 		wp_delete_file( $path );
 
-		// wp_delete_file() returns nothing before WordPress 6.7: judge by the file system.
+		// Judge by the file system: a wp_delete_file filter can redirect or skip the unlink, and a concurrent cleanup can remove the file first.
 		if ( file_exists( $path ) ) {
 			return array(
 				'status' => 'failed',
