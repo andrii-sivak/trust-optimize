@@ -1,0 +1,61 @@
+{
+  "version": 2,
+  "skills": {
+    "wordpress-router": {
+      "source": "WordPress/agent-skills",
+      "commit": "7374e6f1c913b3b02b25465d266d9c0e0a04fc96",
+      "sourceType": "github",
+      "skillPath": "skills/wordpress-router/SKILL.md",
+      "computedHash": "fea6c43a551925f2b489ac035f4b6ebfb5a0863c1c26a38ba5fd8e51f9e012d2",
+      "installMode": "copy"
+    },
+    "wp-performance": {
+      "source": "WordPress/agent-skills",
+      "commit": "7374e6f1c913b3b02b25465d266d9c0e0a04fc96",
+      "sourceType": "github",
+      "skillPath": "skills/wp-performance/SKILL.md",
+      "computedHash": "86a5cd8d634b60870eaacccf3cada1537caf00c3fa5ff015f06b47423baea755",
+      "installMode": "copy"
+    },
+    "wp-plugin-development": {
+      "source": "WordPress/agent-skills",
+      "commit": "7374e6f1c913b3b02b25465d266d9c0e0a04fc96",
+      "sourceType": "github",
+      "skillPath": "skills/wp-plugin-development/SKILL.md",
+      "computedHash": "dbfe220976e2eec5dc90aef6163a873e2cea000bbe007de44d1f7949a4cf4ee6",
+      "installMode": "copy"
+    },
+    "wp-plugin-directory-guidelines": {
+      "source": "WordPress/agent-skills",
+      "commit": "7374e6f1c913b3b02b25465d266d9c0e0a04fc96",
+      "sourceType": "github",
+      "skillPath": "skills/wp-plugin-directory-guidelines/SKILL.md",
+      "computedHash": "d8da545c30a48ed02a7b40f38cf60a71672aa721293f57493768ff35512e836b",
+      "installMode": "copy"
+    },
+    "wp-project-triage": {
+      "source": "WordPress/agent-skills",
+      "commit": "7374e6f1c913b3b02b25465d266d9c0e0a04fc96",
+      "sourceType": "github",
+      "skillPath": "skills/wp-project-triage/SKILL.md",
+      "computedHash": "e8dc1979ef22c9b8b94856a0f49d2c47bba7e3d519b34290de366cc02f67ccba",
+      "installMode": "copy"
+    },
+    "wp-rest-api": {
+      "source": "WordPress/agent-skills",
+      "commit": "7374e6f1c913b3b02b25465d266d9c0e0a04fc96",
+      "sourceType": "github",
+      "skillPath": "skills/wp-rest-api/SKILL.md",
+      "computedHash": "a043a646817a302c5d5602b78acd1ceb0f583d93bdd3bf74b97f4eee9ccf5432",
+      "installMode": "copy"
+    },
+    "wp-wpcli-and-ops": {
+      "source": "WordPress/agent-skills",
+      "commit": "7374e6f1c913b3b02b25465d266d9c0e0a04fc96",
+      "sourceType": "github",
+      "skillPath": "skills/wp-wpcli-and-ops/SKILL.md",
+      "computedHash": "86e51372f1454a5c90d33bb51a49b27eccd98c26ce7f09be8fe4df6e049292f3",
+      "installMode": "copy"
+    }
+  }
+}
