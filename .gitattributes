@@ -1,19 +1,14 @@
-# Files that are not part of the release archive (git archive).
-/.editorconfig   export-ignore
-/.gitattributes  export-ignore
-/.github         export-ignore
-/.gitignore      export-ignore
-/docs            export-ignore
-/phpcs.xml       export-ignore
-/phpunit.xml.dist export-ignore
-/scripts         export-ignore
-/tests           export-ignore
-/tools           export-ignore
-/CONTRIBUTING.md export-ignore
-/info            export-ignore
-/_bmad           export-ignore
-/_bmad-output    export-ignore
-/.claude         export-ignore
-/.agents         export-ignore
-/.agent          export-ignore
-/.junie          export-ignore
+# The release archive (git archive) contains only the paths listed below.
+# Everything else, including any new file or directory, stays out by default.
+/*                  export-ignore
+/assets             -export-ignore
+/includes           -export-ignore
+/templates          -export-ignore
+/trust-optimize.php -export-ignore
+/uninstall.php      -export-ignore
+/readme.txt         -export-ignore
+/README.md          -export-ignore
+/CHANGELOG.md       -export-ignore
+/LICENSE            -export-ignore
+/composer.json      -export-ignore
+/composer.lock      -export-ignore
