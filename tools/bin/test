@@ -29,8 +29,9 @@ exec "$(dirname "$0")/compose" run --rm -T -e "TO_SUITE=$suite" -e "TO_WP_VERSIO
   mkdir -p "$core/wp-content"
 
   # The wp-phpunit library must match the core under test (X.Y), including for "latest".
-  # WP-CLI prints PHP 8.5 deprecation notices to stdout before the version, so keep the last line only.
-  core_version="$(wp core version --path="$core" | tail -n 1)"
+  # WP-CLI prints PHP 8.5 deprecation notices to stdout before the version, so keep the last line that looks like a version.
+  core_version="$(wp core version --path="$core" | grep -E "^[0-9]+\.[0-9]+" | tail -n 1 || true)"
+  if [ -z "$core_version" ]; then echo "Could not read the WordPress version from $core" >&2; exit 1; fi
   lib_version="$(echo "$core_version" | cut -d. -f1,2)"
   lib_root="$WP_CORE_CACHE_DIR/tests-$lib_version"
   if [ ! -d "$lib_root/vendor/wp-phpunit/wp-phpunit" ]; then
