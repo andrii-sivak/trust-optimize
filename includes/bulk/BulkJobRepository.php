@@ -100,7 +100,7 @@ class BulkJobRepository {
 				'cursor_id'         => 0,
 				'total'             => (int) $total,
 				'settings_snapshot' => wp_json_encode( $settings_snapshot ),
-				'updated_at'        => current_time( 'mysql' ),
+				'updated_at'        => current_time( 'mysql', true ),
 			)
 		);
 
@@ -278,7 +278,7 @@ class BulkJobRepository {
 	public function mark_running( $job_id ) {
 		global $wpdb;
 
-		$now = current_time( 'mysql' );
+		$now = current_time( 'mysql', true );
 
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery
 		$changed = $wpdb->query(
@@ -338,7 +338,7 @@ class BulkJobRepository {
 				$this->get_table_name(),
 				JobStatus::PAUSED,
 				$reason,
-				current_time( 'mysql' ),
+				current_time( 'mysql', true ),
 				JobStatus::PENDING,
 				JobStatus::RUNNING
 			)
@@ -434,7 +434,7 @@ class BulkJobRepository {
 		global $wpdb;
 
 		$table     = $this->get_table_name();
-		$threshold = gmdate( 'Y-m-d H:i:s', strtotime( current_time( 'mysql' ) ) - (int) $stale_after_seconds );
+		$threshold = gmdate( 'Y-m-d H:i:s', time() - (int) $stale_after_seconds );
 
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 		$rows = $wpdb->get_results(
@@ -512,7 +512,7 @@ class BulkJobRepository {
 		global $wpdb;
 
 		$table              = $this->get_table_name();
-		$data['updated_at'] = current_time( 'mysql' );
+		$data['updated_at'] = current_time( 'mysql', true );
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 		$result = $wpdb->update(
@@ -534,7 +534,7 @@ class BulkJobRepository {
 	 */
 	private function finish( $job_id, $status, array $data = array() ) {
 		$data['status']      = $status;
-		$data['finished_at'] = current_time( 'mysql' );
+		$data['finished_at'] = current_time( 'mysql', true );
 		$finished            = $this->transition( $job_id, JobStatus::active(), $data );
 
 		if ( $finished && $this->read_mutex() === (int) $job_id ) {
@@ -555,7 +555,7 @@ class BulkJobRepository {
 	private function transition( $job_id, array $from, array $data ) {
 		global $wpdb;
 
-		$data['updated_at'] = current_time( 'mysql' );
+		$data['updated_at'] = current_time( 'mysql', true );
 		$data               = array_intersect_key( $data, array_flip( self::UPDATABLE_COLUMNS ) );
 		$sets               = array();
 		$values             = array( $this->get_table_name() );

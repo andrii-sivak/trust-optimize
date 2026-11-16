@@ -8,7 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A running bulk job was paused as stale after a DST change or a change of the site timezone, and a job that had really stopped could be detected as stale hours late, because job timestamps and the stale threshold used site-local time.
 - The Documentation link on the settings page, the plugin and author URIs and the link in `readme.txt` point to the renamed GitHub account; the old author profile link returned 404.
+
+### Changed
+- Bulk job timestamps (`started_at`, `updated_at`, `finished_at`) in the REST API and WP-CLI are now UTC, in the same `Y-m-d H:i:s` format. Values written before the update are not converted.
 
 ## [1.0.0] - 2026-10-05
 

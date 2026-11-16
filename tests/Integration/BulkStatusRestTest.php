@@ -6,7 +6,6 @@
  */
 
 use TrustOptimize\Bulk\BulkJob;
-use TrustOptimize\Bulk\BulkJobRepository;
 use TrustOptimize\Bulk\BulkProducer;
 use TrustOptimize\Capabilities\CapabilityService;
 use TrustOptimize\Core\Plugin;
@@ -63,7 +62,12 @@ class BulkStatusRestTest extends WP_UnitTestCase {
 
 	public function test_polling_does_not_pause_an_abandoned_job() {
 		$job = Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
-		( new BulkJobRepository( new DatabaseManager() ) )->update( $job->get_id(), array( 'updated_at' => gmdate( 'Y-m-d H:i:s', time() - DAY_IN_SECONDS ) ) );
+		global $wpdb;
+		$wpdb->update(
+			$wpdb->prefix . 'trust_optimize_jobs',
+			array( 'updated_at' => gmdate( 'Y-m-d H:i:s', time() - DAY_IN_SECONDS ) ),
+			array( 'id' => $job->get_id() )
+		);
 		$before = $this->snapshot();
 
 		$response = rest_do_request( new WP_REST_Request( 'GET', '/trust-optimize/v1/bulk/status' ) );
