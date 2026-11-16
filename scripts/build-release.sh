@@ -76,7 +76,7 @@ git -C "$SRC_DIR" archive "$COMMIT" | tar -x -C "$STAGE_DIR"
 for required in trust-optimize.php uninstall.php readme.txt LICENSE includes templates assets vendor/autoload.php vendor/woocommerce/action-scheduler/action-scheduler.php; do
 	[ -e "$STAGE_DIR/$required" ] || fail "missing in the archive: $required"
 done
-for forbidden in tests docs tools scripts info _bmad _bmad-output .claude .agents .agent .junie CONTRIBUTING.md .github .husky .git node_modules phpcs.xml phpunit.xml.dist package.json vendor/phpunit vendor/squizlabs vendor/wp-coding-standards vendor/phpcompatibility vendor/phpcsstandards vendor/dealerdirect vendor/yoast vendor/wp-phpunit; do
+for forbidden in tests docs tools scripts info _bmad _bmad-output .claude .agents .agent .junie CONTRIBUTING.md AGENTS.md CLAUDE.md skills-lock.json .github .husky .git node_modules phpcs.xml phpunit.xml.dist package.json vendor/phpunit vendor/squizlabs vendor/wp-coding-standards vendor/phpcompatibility vendor/phpcsstandards vendor/dealerdirect vendor/yoast vendor/wp-phpunit; do
 	[ ! -e "$STAGE_DIR/$forbidden" ] || fail "must not be in the archive: $forbidden"
 done
 
