@@ -2,9 +2,10 @@
 title: 'Store and compare bulk job timestamps in UTC (GitHub #12)'
 type: 'bugfix'
 created: '2026-11-16'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '78a9d45aaf5c2912689d8d6dfa088ce9de8ba68c'
 route: 'dispatch'
-review_loop_iteration: 0
+review_loop_iteration: 1
 context: []
 ---
 
@@ -21,7 +22,9 @@ context: []
 **Always:**
 - Timestamps are written with `current_time( 'mysql', true )`; the threshold is `gmdate( 'Y-m-d H:i:s', time() - $seconds )`.
 - REST `GET /trust-optimize/v1/bulk/status` and `wp trust-optimize status` keep returning the same fields in the same `Y-m-d H:i:s` format; only the values become UTC (owner decision).
-- `CHANGELOG.md` under `## [Unreleased]`: a `### Fixed` entry (a running bulk job was paused as stale after a DST change or a site timezone change) and a `### Changed` entry (job timestamps in REST and WP-CLI are UTC; rows written before the update keep local time and are not converted, so a running job on a site west of UTC may be paused once after the update and needs Resume).
+- `CHANGELOG.md` under `## [Unreleased]`, exactly this wording (owner-approved after review):
+  - `### Fixed`: "A running bulk job was paused as stale after a DST change or a change of the site timezone, and a job that had really stopped could be detected as stale hours late, because job timestamps and the stale threshold used site-local time."
+  - `### Changed`: "Bulk job timestamps (`started_at`, `updated_at`, `finished_at`) in the REST API and WP-CLI are now UTC, in the same `Y-m-d H:i:s` format. Values written before the update are not converted."
 
 **Never:**
 - No conversion of existing rows, no upgrade routine, no `DB_VERSION` bump (owner decision).
@@ -50,10 +53,10 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `tests/Integration/BulkJobRepositoryTest.php` -- add one test per matrix row; set the site offset with `update_option( 'gmt_offset', … )` and `update_option( 'timezone_string', '' )`, age rows with a direct `$wpdb` UPDATE. Run them before changing the repository: the first two rows must fail, otherwise stop and report. Put the failure output in the report and commit the tests together with the fix -- proves the tests catch the defect without leaving a red commit.
-- [ ] `includes/bulk/BulkJobRepository.php` -- switch every write and the threshold to UTC -- the fix.
-- [ ] `tests/Integration/BulkStatusRestTest.php` -- age the job with a direct `$wpdb` UPDATE instead of `update()` -- the test must exercise an abandoned job.
-- [ ] `CHANGELOG.md` -- the two entries from Boundaries -- documents the behavior change.
+- [x] `tests/Integration/BulkJobRepositoryTest.php` -- add one test per matrix row; set the site offset with `update_option( 'gmt_offset', … )` and `update_option( 'timezone_string', '' )`, age rows with a direct `$wpdb` UPDATE. Run them before changing the repository: the first two rows must fail, otherwise stop and report. Put the failure output in the report and commit the tests together with the fix -- proves the tests catch the defect without leaving a red commit.
+- [x] `includes/bulk/BulkJobRepository.php` -- switch every write and the threshold to UTC -- the fix.
+- [x] `tests/Integration/BulkStatusRestTest.php` -- age the job with a direct `$wpdb` UPDATE instead of `update()` -- the test must exercise an abandoned job.
+- [x] `CHANGELOG.md` -- the two entries from Boundaries -- documents the behavior change.
 
 **Acceptance Criteria:**
 - Given the fix, when `git grep -n "current_time( 'mysql' )" -- includes` runs, then it prints nothing.
@@ -69,6 +72,27 @@ context: []
 
 ## Implementation Notes
 
+- 364763b: the fix, four matrix tests and the repaired REST test; red phase confirmed (the first two matrix rows and the UTC-write test failed on the old code). 69f373f: review patch (UTC writes of `touch()` and `pause_unfinished()` at offset +3) and the owner-approved CHANGELOG wording.
+- Verified locally on PHP 8.0: phpcs clean, unit 80 OK, integration 8.0/6.5 236 OK (8 skipped), multisite 8 OK. PHP 8.4 checks were not run locally (the `tools-php84` image could not be built on a slow network); CI runs them.
+- A pre-existing test-isolation leak in the local test database made four unrelated tests fail; recorded in `deferred-work.md`.
+
 ## Spec Change Log
 
+- Review pass 1, triage row 3: the CHANGELOG wording in the frozen block named only the west-of-UTC transition effect and only the false-pause symptom. Owner renegotiated the wording (2026-11-16): the Fixed entry names both symptoms; the Changed entry drops the transition effects because no bulk job runs on any installed site at update time. Code was not reverted: the root cause is the CHANGELOG text only, which the code does not depend on (owner-approved). Avoids: a changelog that describes half of the bug and a transition nobody will meet. KEEP: the repository change, the four matrix tests and the repaired REST test as committed in the first pass.
+
 ## Review Triage Log
+
+| # | Source | Finding | Verdict | Evidence / route |
+|---|---|---|---|---|
+| 1 | edge-case | Pre-update running row on a site east of UTC: a dead job is recovered up to offset hours late and keeps the mutex | medium | Real, but the frozen intent excludes converting old rows (owner decision). Rejected as out of scope by intent; its documentation is row 3. |
+| 2 | edge-case | Resumed pre-update job keeps a local `started_at` (COALESCE) next to UTC `updated_at`/`finished_at` | low | Real; nothing in the plugin computes durations. Rejected: intent excludes conversion, and the Changed entry already says pre-update values stay local. |
+| 3 | edge-case, blind, verification-gap | CHANGELOG describes only the west-of-UTC effect; east of UTC a dead pre-update job is detected late; the Fixed entry names only the false pause, not the late detection | medium | Real: the owner was told about both directions, the spec's CHANGELOG wording kept only one. Wording sits inside the frozen block -> intent_gap, owner to approve the amended wording. |
+| 4 | blind | Schema default `DEFAULT CURRENT_TIMESTAMP` uses the DB session time | low | Pre-existing; `create()` always sets `updated_at`, so the default is never used. Frozen intent forbids schema changes. Rejected. |
+| 5 | blind | REST/CLI consumers cannot tell UTC values from old local ones; no `_gmt` names or schema note | low | Owner decision A keeps names and format. Rejected by intent. |
+| 6 | blind | No test for an offset that shrinks after a write | low | The fixed code no longer reads the site offset; the west-of-UTC and growing-offset tests already pin the threshold to UTC from both sides. Rejected: unlikely to catch anything the existing tests miss. |
+| 7 | blind | The fresh-job test passes on the old code too | false | Intended: it is a matrix row (regression guard for the fix not over-pausing), not a red-phase test. |
+| 8 | blind | DST through a named `timezone_string` is not tested | low | `current_time( 'mysql', true )` and `time()` ignore the site zone; a named-zone test exercises the same path as `gmt_offset`. Rejected. |
+| 9 | blind, verification-gap | UTC writes of `update()`/`touch()` and `pause_unfinished()` are only exercised at offset 0, so a regression in the producer heartbeat would pass every test | medium | Verified: `test_written_timestamps_are_utc` never calls them under a non-zero offset; `fail`/`cancel` share `finish()` with `complete()` and are covered. Route: patch (test-only). |
+| 10 | blind | Tests hard-code `$wpdb->prefix . 'trust_optimize_jobs'` | low | Same as the existing `row()` helper; `get_table_name()` is private; a rename fails loudly. Rejected. |
+| 11 | blind | `tear_down()` deletes the options instead of restoring them | low | The test case rolls back the database and flushes the cache in `set_up()`; deleted options read as offset 0, the default. Harmless. Rejected. |
+| 12 | verification-gap | The old REST test never aged the job; the new one does | false | Not a defect: confirms the intended repair. |
