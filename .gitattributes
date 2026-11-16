@@ -9,3 +9,11 @@
 /scripts         export-ignore
 /tests           export-ignore
 /tools           export-ignore
+/CONTRIBUTING.md export-ignore
+/info            export-ignore
+/_bmad           export-ignore
+/_bmad-output    export-ignore
+/.claude         export-ignore
+/.agents         export-ignore
+/.agent          export-ignore
+/.junie          export-ignore
