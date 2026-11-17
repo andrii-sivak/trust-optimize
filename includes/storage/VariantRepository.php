@@ -8,6 +8,7 @@
 namespace TrustOptimize\Storage;
 
 use TrustOptimize\Database\DatabaseManager;
+use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Domain\VariantStatus;
 use TrustOptimize\Settings\OptimizationSettings;
 
@@ -148,13 +149,18 @@ class VariantRepository {
 	/**
 	 * Atomically move a variant between statuses (compare-and-set).
 	 *
-	 * @param int    $id     Variant row id.
-	 * @param string $from   Expected current status.
-	 * @param string $to     New status.
-	 * @param array  $fields Further columns to set together with the status.
-	 * @return bool True when this call performed the transition.
+	 * With a token the transition also requires that the attempt holds the attachment ("processing" with that
+	 * token), so a worker that lost its attempt cannot change a row any more. A variant enters "processing"
+	 * only through such a guarded transition.
+	 *
+	 * @param int         $id     Variant row id.
+	 * @param string      $from   Expected current status.
+	 * @param string      $to     New status.
+	 * @param array       $fields Further columns to set together with the status.
+	 * @param string|null $token  Token of the attempt that makes the change; null for a change outside an attempt.
+	 * @return bool|null True when this call performed the transition, false when no row matched, null on a database error.
 	 */
-	public function transition( $id, $from, $to, array $fields = array() ) {
+	public function transition( $id, $from, $to, array $fields = array(), $token = null ) {
 		global $wpdb;
 
 		$set  = array_merge( array_intersect_key( $fields, self::DEFAULTS ), array( 'status' => $to ) );
@@ -172,16 +178,29 @@ class VariantRepository {
 		$args[] = (int) $id;
 		$args[] = $from;
 
+		$guard = '';
+		if ( null !== $token ) {
+			$guard  = ' AND EXISTS ( SELECT 1 FROM %i a WHERE a.attachment_id = %i.attachment_id AND a.state = %s AND a.attempt_token = %s )';
+			$args[] = $this->database->get_plugin_table_names()['attachments'];
+			$args[] = $this->table();
+			$args[] = AttachmentState::PROCESSING;
+			$args[] = $token;
+		}
+
 		// phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter -- Column names are whitelisted by self::DEFAULTS, every value is a bound placeholder.
-		$changed = 1 === (int) $wpdb->query(
-			$wpdb->prepare( "UPDATE {$this->table()} SET " . implode( ', ', $sets ) . ' WHERE id = %d AND status = %s', $args )
+		$changed = $wpdb->query(
+			$wpdb->prepare( "UPDATE {$this->table()} SET " . implode( ', ', $sets ) . ' WHERE id = %d AND status = %s' . $guard, $args )
 		);
 
-		if ( $changed ) {
+		if ( false === $changed ) {
+			return null;
+		}
+
+		if ( 1 === (int) $changed ) {
 			$this->invalidate_by_id( $id );
 		}
 
-		return $changed;
+		return 1 === (int) $changed;
 	}
 
 	/**
@@ -588,11 +607,11 @@ class VariantRepository {
 	}
 
 	/**
-	 * Drop the cache entry of an attachment.
+	 * Drop the cache entry of an attachment, after a change that did not go through this repository.
 	 *
 	 * @param int $attachment_id Attachment ID.
 	 */
-	private function invalidate( $attachment_id ) {
+	public function invalidate( $attachment_id ) {
 		wp_cache_delete( $this->cache_key( $attachment_id ), self::CACHE_GROUP );
 	}
 

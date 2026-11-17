@@ -58,7 +58,7 @@ class LifecycleTest extends WP_UnitTestCase {
 		);
 		$this->assertCount( 2, $this->pending_in_group() );
 
-		$this->attachments->claim( $ids[1] );
+		$this->attachments->claim( $ids[1], AttachmentRepository::SOURCE_QUEUE );
 
 		Lifecycle::deactivate();
 

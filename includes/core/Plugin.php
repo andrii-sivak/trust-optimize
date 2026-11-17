@@ -16,6 +16,7 @@ use TrustOptimize\Bulk\BulkJobRepository;
 use TrustOptimize\Bulk\BulkProducer;
 use TrustOptimize\Bulk\EligibilityQuery;
 use TrustOptimize\Bulk\Inventory;
+use TrustOptimize\Bulk\JobHealth;
 use TrustOptimize\Bulk\JobProgress;
 use TrustOptimize\Capabilities\CapabilityService;
 use TrustOptimize\CLI\Command;
@@ -103,6 +104,13 @@ class Plugin {
 	public $bulk_producer;
 
 	/**
+	 * Job health checks.
+	 *
+	 * @var JobHealth
+	 */
+	public $job_health;
+
+	/**
 	 * REST controller.
 	 *
 	 * @var RestController
@@ -131,7 +139,7 @@ class Plugin {
 		$variants     = new VariantRepository( $database );
 		$attachments  = new AttachmentRepository( $database, $variants );
 		$ownership    = new FileOwnership( $variants );
-		$converter    = new ImageConverter( $variants, new AtomicImageWriter( $ownership ), $capabilities );
+		$converter    = new ImageConverter( $variants, new AtomicImageWriter( $ownership ), $capabilities, $attachments );
 		$jobs         = new BulkJobRepository( $database );
 		$eligibility  = new EligibilityQuery( $variants );
 		$progress     = new JobProgress( $attachments, $eligibility );
@@ -144,6 +152,7 @@ class Plugin {
 		$this->conversion_queue = new ConversionQueue( $attachments, $this->processor, $this->planner, $database );
 		$this->inventory        = new Inventory( $eligibility, $attachments, $variants, $settings, $capabilities );
 		$this->bulk_producer    = new BulkProducer( $jobs, $eligibility, $progress, $attachments, $this->conversion_queue, $this->cleanup, $this->inventory, $settings, $capabilities, $database );
+		$this->job_health       = new JobHealth( $attachments, $jobs, $this->conversion_queue, $database );
 		$statistics             = new Statistics( $this->inventory, $variants );
 		$health                 = new SiteHealth( $capabilities );
 		$this->admin            = new Admin( $settings, $attachments, $eligibility, $capabilities, $variants, $statistics, $health );
@@ -157,7 +166,7 @@ class Plugin {
 			new ImageDelivery( new PictureRenderer( $variants, $urls ), $primer, new SourceResolver( $variants, $urls ), $settings ),
 			$this->cleanup,
 			$this->conversion_queue,
-			new Maintenance( $attachments, $this->conversion_queue ),
+			new Maintenance( $attachments, $this->conversion_queue, $this->job_health ),
 			new Lifecycle( $attachments, $this->conversion_queue ),
 			$health,
 			$this->bulk_producer,

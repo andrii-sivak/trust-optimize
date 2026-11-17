@@ -7,6 +7,7 @@
 
 namespace TrustOptimize\Processing;
 
+use Throwable;
 use TrustOptimize\Admin\Settings;
 use TrustOptimize\Capabilities\CapabilityService;
 use TrustOptimize\Database\DatabaseManager;
@@ -35,6 +36,16 @@ class AttachmentProcessor {
 	 * Message of the failed result of a sync that waits for the database update.
 	 */
 	const SCHEMA_PENDING = 'schema_pending';
+
+	/**
+	 * Message of the skipped result of a run or sync that found the attachment held or parked.
+	 */
+	const BUSY = 'busy';
+
+	/**
+	 * Message of the skipped result of a run whose attempt was taken away while it worked.
+	 */
+	const ATTEMPT_LOST = 'attempt_lost';
 
 	/**
 	 * Attachment repository.
@@ -118,39 +129,63 @@ class AttachmentProcessor {
 	/**
 	 * Bring an attachment up to date right now: plan, remove what is no longer wanted, convert.
 	 *
-	 * This is the synchronous path used by REST, WP-CLI and bulk jobs; the queue uses run().
+	 * This is the synchronous path used by REST and WP-CLI; the queue and bulk jobs use run().
+	 * It claims the attachment first: an attachment that a worker holds is answered "busy" before
+	 * anything else happens, so a request that cannot run changes nothing. Planning, removals and
+	 * conversion all run under the claim, which ends with one write.
 	 *
 	 * @param int $attachment_id Attachment ID.
-	 * @return OptimizeResult Data: 'state', 'deleted' (files removed) and, for a skipped attachment, 'reason'. Failed with SCHEMA_PENDING before the database update has finished.
+	 * @return OptimizeResult Data: 'state', 'deleted' (files removed) and, for a skipped attachment, 'reason'. Failed with SCHEMA_PENDING before the database update has finished; skipped as "busy" (data 'source' and 'since') when a worker holds the attachment.
+	 * @throws Throwable Whatever planning or conversion threw, after the attempt was ended as failed.
 	 */
 	public function sync( $attachment_id ) {
 		if ( ! $this->database->has_schema( '1.2.0' ) ) {
 			return OptimizeResult::failed( self::SCHEMA_PENDING );
 		}
 
-		// An explicit request gives a file that failed too often another chance.
-		$this->attachments->reset_attempts( $attachment_id );
+		$token = $this->begin( $attachment_id, AttachmentRepository::SOURCE_SYNC );
 
-		$plan    = $this->planner->plan( $attachment_id );
-		$deleted = $this->apply_removals( $attachment_id, $plan );
+		if ( false === $token ) {
+			$row = $this->attachments->get( $attachment_id );
 
-		if ( $plan->is_skipped() ) {
-			return OptimizeResult::skipped( $plan->skip_reason(), array( 'deleted' => $deleted ) );
-		}
-
-		if ( ! $plan->has_work() ) {
-			$state = $this->attachments->recompute( $attachment_id );
-
-			return OptimizeResult::success(
-				'up_to_date',
+			return OptimizeResult::skipped(
+				self::BUSY,
 				array(
-					'state'   => $state,
-					'deleted' => $deleted,
+					'source' => $row['attempt_source'] ?? null,
+					'since'  => $row['updated_at'] ?? null,
 				)
 			);
 		}
 
-		return $this->with_data( $this->run( $attachment_id, INF ), array( 'deleted' => $deleted ) );
+		try {
+			$plan    = $this->planner->plan( $attachment_id, true );
+			$deleted = $this->apply_removals( $attachment_id, $plan );
+
+			if ( $plan->is_skipped() ) {
+				$this->attachments->finish( $attachment_id, $token, AttachmentState::SKIPPED, $plan->skip_reason() );
+
+				return OptimizeResult::skipped( $plan->skip_reason(), array( 'deleted' => $deleted ) );
+			}
+
+			if ( ! $plan->has_work() ) {
+				$state = AttachmentRepository::derive_state( $this->variants->count_by_status( $attachment_id ) );
+				$this->attachments->finish( $attachment_id, $token, $state );
+
+				return OptimizeResult::success(
+					'up_to_date',
+					array(
+						'state'   => $state,
+						'deleted' => $deleted,
+					)
+				);
+			}
+		} catch ( Throwable $throwable ) {
+			$this->attachments->finish( $attachment_id, $token, AttachmentState::FAILED, 'exception', $throwable->getMessage() );
+
+			throw $throwable;
+		}
+
+		return $this->with_data( $this->convert_claimed( $attachment_id, $token, INF ), array( 'deleted' => $deleted ) );
 	}
 
 	/**
@@ -201,28 +236,78 @@ class AttachmentProcessor {
 	}
 
 	/**
-	 * Convert the pending variants of an attachment, one by one.
+	 * Convert the pending variants of an attachment, one by one, as a queue worker.
 	 *
 	 * The attachment is claimed first, so two workers never process it together.
 	 * When the time budget runs out the rest stays pending and the result asks for
-	 * another run (data 'more'). The aggregate state is recomputed at the end.
+	 * another run (data 'more'). The aggregate state is stored by the closing write.
 	 *
 	 * @param int        $attachment_id Attachment ID.
 	 * @param float|null $budget        Time budget in seconds; null uses the filterable default.
-	 * @return OptimizeResult Data: 'state' (AttachmentState) and 'more' (bool).
+	 * @return OptimizeResult Data: 'state' (AttachmentState) and 'more' (bool). Skipped as "busy" when the attachment is held or parked, as "attempt_lost" when the attempt was taken away meanwhile.
 	 */
 	public function run( $attachment_id, $budget = null ) {
-		if ( ! $this->attachments->claim( $attachment_id ) ) {
-			return OptimizeResult::skipped( 'busy', array( 'more' => false ) );
+		$token = $this->begin( $attachment_id, AttachmentRepository::SOURCE_QUEUE );
+
+		if ( false === $token ) {
+			return OptimizeResult::skipped( self::BUSY, array( 'more' => false ) );
 		}
 
-		// This worker owns the attachment, so a row stuck in "processing" belongs to a crashed run.
+		return $this->convert_claimed( $attachment_id, $token, $budget );
+	}
+
+	/**
+	 * Claim an attachment and take over what a dead attempt left behind.
+	 *
+	 * @param int    $attachment_id Attachment ID.
+	 * @param string $source        AttachmentRepository::SOURCE_*.
+	 * @return string|false The token of the attempt, false when the attachment cannot be claimed.
+	 */
+	private function begin( $attachment_id, $source ) {
+		$token = $this->attachments->claim( $attachment_id, $source );
+
+		if ( false === $token ) {
+			return false;
+		}
+
+		// No other attempt holds the attachment now, so a variant in "processing" belongs to an attempt that ended without finishing.
 		foreach ( $this->variants->get_for_attachment( $attachment_id ) as $row ) {
 			if ( VariantStatus::PROCESSING === $row['status'] ) {
-				$this->variants->transition( $row['id'], VariantStatus::PROCESSING, VariantStatus::PENDING );
+				$this->variants->transition( $row['id'], VariantStatus::PROCESSING, VariantStatus::PENDING, array(), $token );
 			}
 		}
 
+		return $token;
+	}
+
+	/**
+	 * Convert the pending variants of an attachment this attempt holds, then end the attempt.
+	 *
+	 * @param int        $attachment_id Attachment ID.
+	 * @param string     $token         Token of the attempt.
+	 * @param float|null $budget        Time budget in seconds; null uses the filterable default.
+	 * @return OptimizeResult
+	 * @throws Throwable Whatever the conversion threw, after the attempt was ended as failed.
+	 */
+	private function convert_claimed( $attachment_id, $token, $budget ) {
+		try {
+			return $this->convert_pending( $attachment_id, $token, $budget );
+		} catch ( Throwable $throwable ) {
+			$this->attachments->finish( $attachment_id, $token, AttachmentState::FAILED, 'exception', $throwable->getMessage() );
+
+			throw $throwable;
+		}
+	}
+
+	/**
+	 * Convert the pending variants one by one and write the closing state.
+	 *
+	 * @param int        $attachment_id Attachment ID.
+	 * @param string     $token         Token of the attempt.
+	 * @param float|null $budget        Time budget in seconds; null uses the filterable default.
+	 * @return OptimizeResult
+	 */
+	private function convert_pending( $attachment_id, $token, $budget ) {
 		$settings = OptimizationSettings::from_options( $this->settings, $this->capabilities );
 		$deadline = microtime( true ) + ( null === $budget ? $this->time_budget() : $budget );
 		$last_err = null;
@@ -246,26 +331,42 @@ class AttachmentProcessor {
 				}
 
 				$handled[ $row['id'] ] = true;
-				$result                = $this->converter->convert( $row, $settings );
+				$result                = $this->converter->convert( $row, $settings, $token );
+
+				// The file may be in place while its row is not done: the attachment stays held for an operator.
+				if ( ImageConverter::REASON_PUBLISH_INCOMPLETE === $result->get_message() ) {
+					return OptimizeResult::failed( ImageConverter::REASON_PUBLISH_INCOMPLETE, $result->get_errors(), array( 'more' => false ) );
+				}
 
 				if ( $result->is_failed() ) {
 					$errors   = $result->get_errors();
 					$last_err = $errors ? (string) reset( $errors ) : $result->get_message();
 				}
+
+				// Nothing more is published when the lease could not be given back; the closing write clears it.
+				if ( ! empty( $result->get_data()['lease_kept'] ) ) {
+					break 2;
+				}
 			}
 		} while ( $pending );
 
 		// The worker survived: whatever failed, it failed in an orderly way.
-		$this->attachments->reset_attempts( $attachment_id );
+		$state = AttachmentRepository::derive_state( $this->variants->count_by_status( $attachment_id ) );
 
-		$state = $this->attachments->recompute( $attachment_id );
+		// A variant whose last write failed is still "processing": the attachment goes back to the queue and the next claim resets the row.
+		if ( AttachmentState::PROCESSING === $state ) {
+			$state = AttachmentState::QUEUED;
+		}
+
+		$closed = $this->attachments->finish( $attachment_id, $token, $state, null === $last_err ? null : $this->failure_reason( $attachment_id ), $last_err );
+
+		// The attempt was taken away: whoever holds the attachment now owns what happens next.
+		if ( ! $closed ) {
+			return OptimizeResult::skipped( self::ATTEMPT_LOST, array( 'more' => false ) );
+		}
 
 		// A row that appeared after the last look leaves the attachment queued: ask for another run.
 		$more = $more || AttachmentState::QUEUED === $state;
-
-		if ( null !== $last_err ) {
-			$this->attachments->set_state( $attachment_id, $state, $this->failure_reason( $attachment_id ), $last_err );
-		}
 
 		$data = array(
 			'state' => $state,

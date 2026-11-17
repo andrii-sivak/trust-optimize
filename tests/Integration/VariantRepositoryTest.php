@@ -154,4 +154,49 @@ class VariantRepositoryTest extends WP_UnitTestCase {
 		$this->repo->delete_for_attachment( 501 );
 		$this->assertSame( array(), $this->repo->get_for_attachment( 501 ) );
 	}
+
+	public function test_a_token_guarded_transition_needs_the_attempt_that_holds_the_attachment() {
+		$attachments = new TrustOptimize\Storage\AttachmentRepository( new DatabaseManager(), $this->repo );
+		$a           = $this->repo->upsert(
+			array(
+				'attachment_id' => 4301,
+				'size_name'     => 'original',
+				'format'        => 'webp',
+			)
+		);
+		$token       = $attachments->claim( 4301, TrustOptimize\Storage\AttachmentRepository::SOURCE_QUEUE );
+
+		$this->assertFalse( $this->repo->transition( $a, VariantStatus::PENDING, VariantStatus::PROCESSING, array(), str_repeat( 'f', 32 ) ), 'Another attempt.' );
+		$this->assertSame( VariantStatus::PENDING, $this->repo->get_for_attachment( 4301 )[0]['status'] );
+		$this->assertTrue( $this->repo->transition( $a, VariantStatus::PENDING, VariantStatus::PROCESSING, array(), $token ) );
+		$this->assertSame( VariantStatus::PROCESSING, $this->repo->get_for_attachment( 4301 )[0]['status'], 'The cache follows the write.' );
+
+		$attachments->recover_dead( 4301, $token );
+
+		$this->assertFalse( $this->repo->transition( $a, VariantStatus::PENDING, VariantStatus::DONE, array(), $token ), 'The attempt was ended: its worker can change no row.' );
+	}
+
+	public function test_a_transition_reports_a_database_error_as_null() {
+		global $wpdb;
+
+		$id    = $this->repo->upsert(
+			array(
+				'attachment_id' => 4302,
+				'size_name'     => 'original',
+				'format'        => 'webp',
+			)
+		);
+		$break = static function ( $query ) {
+			return false !== strpos( $query, "status = 'processing'" ) || false !== strpos( $query, 'SET status' ) ? 'SELECT * FROM trust_optimize_no_such_table' : $query;
+		};
+		add_filter( 'query', $break );
+		$wpdb->suppress_errors( true );
+
+		try {
+			$this->assertNull( $this->repo->transition( $id, VariantStatus::PENDING, VariantStatus::PROCESSING ) );
+		} finally {
+			$wpdb->suppress_errors( false );
+			remove_filter( 'query', $break );
+		}
+	}
 }

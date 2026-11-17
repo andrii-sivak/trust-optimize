@@ -12,6 +12,7 @@ use TrustOptimize\Domain\VariantStatus;
 use TrustOptimize\Files\AtomicImageWriter;
 use TrustOptimize\Naming\VariantNaming;
 use TrustOptimize\Settings\OptimizationSettings;
+use TrustOptimize\Storage\AttachmentRepository;
 use TrustOptimize\Storage\VariantRepository;
 use TrustOptimize\Utils\UploadsPath;
 use TrustOptimize\Value\OptimizeResult;
@@ -22,6 +23,11 @@ use TrustOptimize\Value\OptimizeResult;
  * Converts one pending variant row into an image file and records the outcome.
  */
 class ImageConverter {
+
+	/**
+	 * Result message of a conversion that left the lease held: the file may be in place while its row is not done.
+	 */
+	const REASON_PUBLISH_INCOMPLETE = 'publish_incomplete';
 
 	/**
 	 * Variant repository.
@@ -45,33 +51,48 @@ class ImageConverter {
 	private $capabilities;
 
 	/**
+	 * Attachment repository (the publication lease lives on the attachment row).
+	 *
+	 * @var AttachmentRepository
+	 */
+	private $attachments;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param VariantRepository $variants     Variant repository.
-	 * @param AtomicImageWriter $writer       Atomic file writer.
-	 * @param CapabilityService $capabilities Capability service.
+	 * @param VariantRepository    $variants     Variant repository.
+	 * @param AtomicImageWriter    $writer       Atomic file writer.
+	 * @param CapabilityService    $capabilities Capability service.
+	 * @param AttachmentRepository $attachments  Attachment repository.
 	 */
-	public function __construct( VariantRepository $variants, AtomicImageWriter $writer, CapabilityService $capabilities ) {
+	public function __construct( VariantRepository $variants, AtomicImageWriter $writer, CapabilityService $capabilities, AttachmentRepository $attachments ) {
 		$this->variants     = $variants;
 		$this->writer       = $writer;
 		$this->capabilities = $capabilities;
+		$this->attachments  = $attachments;
 	}
 
 	/**
-	 * Convert one pending variant.
+	 * Convert one pending variant for the attempt that holds its attachment.
 	 *
-	 * The row moves pending -> processing -> done | skipped | failed. A variant that is
-	 * not smaller than its source is not kept. A format that no editor can write
+	 * The row moves pending -> processing -> done | skipped | failed, every step guarded by the attempt's
+	 * token. A variant that is not smaller than its source is not kept. A format that no editor can write
 	 * is downgraded in the capability service.
+	 *
+	 * The file is written to a temporary name first. Moving it into place replaces a file that may be served,
+	 * so that step runs under the attempt's lease on the attachment row: a worker that lost its attempt (it was
+	 * recovered as dead) cannot take the lease and publishes nothing.
 	 *
 	 * @param array                $variant_row Row from the variants table.
 	 * @param OptimizationSettings $settings    Current settings (quality).
-	 * @return OptimizeResult Success (done), skipped (reason in message; row_gone when the row was removed meanwhile) or failed (reason in message).
+	 * @param string               $token       Token of the attempt that holds the attachment.
+	 * @return OptimizeResult Success (done), skipped (reason in message; row_gone when the row was removed meanwhile, attempt_lost when the attempt no longer holds the attachment) or failed (reason in message; publish_incomplete when the file may be in place but its row is not done, which leaves the lease held). Data 'lease_kept' when the lease could not be released.
 	 */
-	public function convert( array $variant_row, OptimizationSettings $settings ) {
-		$id     = (int) $variant_row['id'];
-		$format = (string) $variant_row['format'];
-		$mime   = 'image/' . $format;
+	public function convert( array $variant_row, OptimizationSettings $settings, $token ) {
+		$id            = (int) $variant_row['id'];
+		$attachment_id = (int) $variant_row['attachment_id'];
+		$format        = (string) $variant_row['format'];
+		$mime          = 'image/' . $format;
 
 		$source_relative = (string) $variant_row['source_relative_path'];
 		$target_relative = VariantNaming::target_relative_path( $source_relative, $format );
@@ -85,14 +106,14 @@ class ImageConverter {
 		// The file already at the target may be replaced only when it is what this row recorded.
 		$owned_hash = ( $variant_row['relative_path'] ?? null ) === $target_relative && ! empty( $variant_row['file_hash'] ) ? $variant_row['file_hash'] : null;
 
-		if ( ! $this->variants->transition( $id, VariantStatus::PENDING, VariantStatus::PROCESSING, $reserve ? array( 'relative_path' => $target_relative ) : array() ) ) {
+		if ( ! $this->variants->transition( $id, VariantStatus::PENDING, VariantStatus::PROCESSING, $reserve ? array( 'relative_path' => $target_relative ) : array(), $token ) ) {
 			return OptimizeResult::skipped( 'not_pending' );
 		}
 
 		$source_path = UploadsPath::absolute( $source_relative );
 
 		if ( null === $source_path || ! is_file( $source_path ) ) {
-			return $this->fail( $id, 'missing_file', 'Source file is missing: ' . $source_relative, $claimed );
+			return $this->fail( $id, $token, 'missing_file', 'Source file is missing: ' . $source_relative, $claimed );
 		}
 
 		$source_size = (int) wp_filesize( $source_path );
@@ -103,10 +124,10 @@ class ImageConverter {
 			if ( 'trust_optimize_unsupported_target_mime' === $editor->get_error_code() ) {
 				$this->capabilities->downgrade( $format, $editor->get_error_message() );
 
-				return $this->fail( $id, 'unsupported_format', $editor->get_error_message(), $claimed );
+				return $this->fail( $id, $token, 'unsupported_format', $editor->get_error_message(), $claimed, $source_size );
 			}
 
-			return $this->fail( $id, 'no_editor', $editor->get_error_message(), $claimed );
+			return $this->fail( $id, $token, 'no_editor', $editor->get_error_message(), $claimed, $source_size );
 		}
 
 		$editor->set_quality( $quality );
@@ -114,13 +135,13 @@ class ImageConverter {
 		$saved = null === $target_path ? new \WP_Error( 'target_outside_uploads', 'Invalid target path.' ) : $this->writer->write_temporary( $editor, $target_path, $mime );
 
 		if ( is_wp_error( $saved ) ) {
-			return $this->fail( $id, $this->failure_reason( $saved ), $saved->get_error_message(), $claimed );
+			return $this->fail( $id, $token, $this->failure_reason( $saved ), $saved->get_error_message(), $claimed, $source_size );
 		}
 
 		$file_size = (int) wp_filesize( $saved['path'] );
 
 		if ( $file_size >= $source_size ) {
-			$published = $this->variants->transition(
+			$skipped = $this->variants->transition(
 				$id,
 				VariantStatus::PROCESSING,
 				VariantStatus::SKIPPED,
@@ -131,22 +152,35 @@ class ImageConverter {
 					'file_size'        => $file_size,
 					'source_file_size' => $source_size,
 					'reason'           => 'not_smaller',
-				)
+				),
+				$token
 			);
 			wp_delete_file( $saved['path'] );
 
 			// The row's previous file goes; a file that is not the row's stays where it is.
-			if ( $this->writer->owns_target( $target_path, $owned_hash ) ) {
+			if ( $skipped && $this->writer->owns_target( $target_path, $owned_hash ) ) {
 				$this->discard_unowned_file( $target_path, $target_relative );
 			}
 
-			return OptimizeResult::skipped( $published ? 'not_smaller' : 'row_gone' );
+			return OptimizeResult::skipped( $skipped ? 'not_smaller' : 'row_gone' );
+		}
+
+		$lease = $this->attachments->take_lease( $attachment_id, $token );
+
+		if ( true !== $lease ) {
+			wp_delete_file( $saved['path'] );
+
+			if ( null === $lease ) {
+				return $this->fail( $id, $token, 'publish_unsafe', 'The lease for replacing the file could not be taken.', $claimed, $source_size );
+			}
+
+			return OptimizeResult::skipped( 'attempt_lost' );
 		}
 
 		$saved = $this->writer->publish( $saved, $target_path, $owned_hash );
 
 		if ( is_wp_error( $saved ) ) {
-			return $this->fail( $id, $this->failure_reason( $saved ), $saved->get_error_message(), $claimed );
+			return $this->fail( $id, $token, $this->failure_reason( $saved ), $saved->get_error_message(), $claimed, $source_size, $attachment_id );
 		}
 
 		$published = $this->variants->transition(
@@ -162,17 +196,25 @@ class ImageConverter {
 				'source_file_size' => $source_size,
 				'file_hash'        => (string) hash_file( 'sha256', $saved['path'] ),
 				'reason'           => null,
-			)
+			),
+			$token
 		);
+
+		// The file is in place but the database did not take the change: whoever looks at it later decides, so the lease stays.
+		if ( null === $published ) {
+			return OptimizeResult::failed( self::REASON_PUBLISH_INCOMPLETE, array( 'The file was written but its row could not be updated.' ) );
+		}
+
+		$data = $this->attachments->release_lease( $attachment_id, $token ) ? array() : array( 'lease_kept' => true );
 
 		// The row was removed while the file was being written: nothing may point at the file now.
 		if ( ! $published ) {
 			$this->discard_unowned_file( $saved['path'], $target_relative );
 
-			return OptimizeResult::skipped( 'row_gone' );
+			return OptimizeResult::skipped( 'row_gone', $data );
 		}
 
-		return OptimizeResult::success( 'done', array( 'relative_path' => $target_relative ) );
+		return OptimizeResult::success( 'done', array( 'relative_path' => $target_relative ) + $data );
 	}
 
 	/**
@@ -190,22 +232,31 @@ class ImageConverter {
 	/**
 	 * Mark a variant failed.
 	 *
-	 * @param int    $id      Variant row id.
-	 * @param string $reason  Machine-readable reason.
-	 * @param string $message Human-readable detail.
-	 * @param bool   $release Whether to give up the path this run reserved for a row that had none.
+	 * @param int      $id            Variant row id.
+	 * @param string   $token         Token of the attempt.
+	 * @param string   $reason        Machine-readable reason.
+	 * @param string   $message       Human-readable detail.
+	 * @param bool     $release       Whether to give up the path this run reserved for a row that had none.
+	 * @param int|null $source_size   Size of the source file when it was measured, so a changed source is recognised later.
+	 * @param int|null $lease_holder  Attachment ID whose publication lease this run holds and gives up now.
 	 * @return OptimizeResult
 	 */
-	private function fail( $id, $reason, $message, $release = false ) {
+	private function fail( $id, $token, $reason, $message, $release = false, $source_size = null, $lease_holder = null ) {
 		$fields = array( 'reason' => $reason );
 
 		if ( $release ) {
 			$fields['relative_path'] = null;
 		}
 
-		$this->variants->transition( $id, VariantStatus::PROCESSING, VariantStatus::FAILED, $fields );
+		if ( null !== $source_size ) {
+			$fields['source_file_size'] = $source_size;
+		}
 
-		return OptimizeResult::failed( $reason, array( $message ) );
+		$this->variants->transition( $id, VariantStatus::PROCESSING, VariantStatus::FAILED, $fields, $token );
+
+		$data = null !== $lease_holder && ! $this->attachments->release_lease( $lease_holder, $token ) ? array( 'lease_kept' => true ) : array();
+
+		return OptimizeResult::failed( $reason, array( $message ), $data );
 	}
 
 	/**

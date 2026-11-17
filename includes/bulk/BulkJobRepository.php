@@ -425,6 +425,35 @@ class BulkJobRepository {
 	}
 
 	/**
+	 * Remember that a worker of the job died, in place of what the job's last error said before.
+	 *
+	 * Neither appends nor touches updated_at: a death is no sign that the job itself is alive.
+	 *
+	 * @param int    $job_id  Job ID.
+	 * @param string $message Text for last_error.
+	 * @return bool True when an unfinished job took the message.
+	 */
+	public function record_death( $job_id, $message ) {
+		global $wpdb;
+
+		$statuses = JobStatus::active();
+
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery
+		return 1 === (int) $wpdb->query(
+			$wpdb->prepare(
+				'UPDATE %i SET last_error = %s WHERE id = %d AND status IN (%s, %s, %s)',
+				$this->get_table_name(),
+				$message,
+				(int) $job_id,
+				$statuses[0],
+				$statuses[1],
+				$statuses[2]
+			)
+		);
+		// phpcs:enable
+	}
+
+	/**
 	 * Merge values into one section of the stored snapshot (the inventory result).
 	 *
 	 * @param int    $job_id Job ID.
