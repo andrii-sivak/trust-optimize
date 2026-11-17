@@ -131,7 +131,7 @@ class Plugin {
 		$variants     = new VariantRepository( $database );
 		$attachments  = new AttachmentRepository( $database, $variants );
 		$ownership    = new FileOwnership( $variants );
-		$converter    = new ImageConverter( $variants, new AtomicImageWriter( $variants, $ownership ), $capabilities );
+		$converter    = new ImageConverter( $variants, new AtomicImageWriter( $ownership ), $capabilities );
 		$jobs         = new BulkJobRepository( $database );
 		$eligibility  = new EligibilityQuery( $variants );
 		$progress     = new JobProgress( $attachments, $eligibility );

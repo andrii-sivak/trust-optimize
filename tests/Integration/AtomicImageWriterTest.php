@@ -42,7 +42,7 @@ class AtomicImageWriterTest extends WP_UnitTestCase {
 		wp_mkdir_p( $this->dir );
 
 		$this->variants = new VariantRepository( new DatabaseManager() );
-		$this->writer   = new AtomicImageWriter( $this->variants, new FileOwnership( $this->variants ) );
+		$this->writer   = new AtomicImageWriter( new FileOwnership( $this->variants ) );
 	}
 
 	public function tear_down() {
@@ -71,12 +71,13 @@ class AtomicImageWriterTest extends WP_UnitTestCase {
 	 * @param WP_Image_Editor $editor Editor.
 	 * @param string          $target Target path.
 	 * @param string          $mime   MIME type.
+	 * @param string|null     $hash   What the variant row recorded for an existing target.
 	 * @return array|WP_Error
 	 */
-	private function save( $editor, $target, $mime ) {
+	private function save( $editor, $target, $mime, $hash = null ) {
 		$saved = $this->writer->write_temporary( $editor, $target, $mime );
 
-		return is_wp_error( $saved ) ? $saved : $this->writer->publish( $saved, $target );
+		return is_wp_error( $saved ) ? $saved : $this->writer->publish( $saved, $target, $hash );
 	}
 
 	private function leftovers() {
@@ -126,35 +127,35 @@ class AtomicImageWriterTest extends WP_UnitTestCase {
 		$this->assertSame( array(), $this->leftovers() );
 	}
 
-	public function test_overwrites_a_file_owned_by_a_variant_row() {
+	public function test_overwrites_a_file_that_is_what_the_variant_row_recorded() {
 		$source = $this->make_jpeg( 'photo.jpg' );
 		$target = $this->dir . '/photo.jpg.webp';
 		file_put_contents( $target, 'old variant' );
-		$this->variants->upsert(
-			array(
-				'attachment_id' => 801,
-				'size_name'     => 'original',
-				'format'        => 'webp',
-				'relative_path' => $this->relative( $target ),
-			)
-		);
 
-		$this->assertIsArray( $this->save( wp_get_image_editor( $source ), $target, 'image/webp' ) );
+		$result = $this->save( wp_get_image_editor( $source ), $target, 'image/webp', hash( 'sha256', 'old variant' ) );
+
+		$this->assertIsArray( $result );
 		$this->assertNotSame( 'old variant', file_get_contents( $target ) );
+		$this->assertSame( array(), $this->leftovers() );
+	}
+
+	public function test_keeps_a_file_that_differs_from_the_recorded_hash() {
+		$source = $this->make_jpeg( 'photo.jpg' );
+		$target = $this->dir . '/photo.jpg.webp';
+		file_put_contents( $target, 'edited by hand' );
+
+		$result = $this->save( wp_get_image_editor( $source ), $target, 'image/webp', hash( 'sha256', 'old variant' ) );
+
+		$this->assertWPError( $result );
+		$this->assertSame( 'target_exists_foreign', $result->get_error_code() );
+		$this->assertSame( 'edited by hand', file_get_contents( $target ) );
+		$this->assertSame( array(), $this->leftovers() );
 	}
 
 	public function test_never_overwrites_the_original_of_another_attachment() {
 		$source = $this->make_jpeg( 'photo.jpg' );
 		$target = $this->dir . '/photo.jpg.webp';
 		file_put_contents( $target, 'original of another attachment' );
-		$this->variants->upsert(
-			array(
-				'attachment_id' => 801,
-				'size_name'     => 'original',
-				'format'        => 'webp',
-				'relative_path' => $this->relative( $target ),
-			)
-		);
 		self::factory()->post->create(
 			array(
 				'post_type'  => 'attachment',
@@ -162,7 +163,7 @@ class AtomicImageWriterTest extends WP_UnitTestCase {
 			)
 		);
 
-		$result = $this->save( wp_get_image_editor( $source ), $target, 'image/webp' );
+		$result = $this->save( wp_get_image_editor( $source ), $target, 'image/webp', hash( 'sha256', 'original of another attachment' ) );
 
 		$this->assertWPError( $result );
 		$this->assertSame( 'target_exists_foreign', $result->get_error_code() );

@@ -61,11 +61,15 @@ class QueueRecoveryTest extends WP_UnitTestCase {
 		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
 		$source = $this->variants->get_for_attachment( $id )[0]['source_relative_path'];
 
+		// The regeneration adds a size of its own: two rows never share a target file.
+		$late_source = dirname( $source ) . '/late-copy.jpg';
+		copy( wp_upload_dir()['basedir'] . '/' . $source, wp_upload_dir()['basedir'] . '/' . $late_source );
+
 		// While the first conversion runs, a regeneration adds another pending row.
 		$injected = false;
 		add_filter(
 			'wp_image_editors',
-			function ( $editors ) use ( &$injected, $id, $source ) {
+			function ( $editors ) use ( &$injected, $id, $late_source ) {
 				if ( ! $injected ) {
 					$injected = true;
 					$this->variants->upsert(
@@ -73,7 +77,7 @@ class QueueRecoveryTest extends WP_UnitTestCase {
 							'attachment_id'        => $id,
 							'size_name'            => 'late',
 							'format'               => 'webp',
-							'source_relative_path' => $source,
+							'source_relative_path' => $late_source,
 						)
 					);
 				}

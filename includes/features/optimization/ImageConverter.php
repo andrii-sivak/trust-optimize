@@ -77,11 +77,13 @@ class ImageConverter {
 		$target_relative = VariantNaming::target_relative_path( $source_relative, $format );
 		$target_path     = UploadsPath::absolute( $target_relative );
 
-		// The row claims its target path before anything is written: a run killed between the rename
-		// and the update of the row can then overwrite its own file next time instead of taking it for
-		// a foreign one. A file that no row owns is not ours to claim; the writer refuses it.
+		// The row claims its target path before anything is written, so the file this run is about to
+		// create is attributed to the row. A file that no row owns is not ours to claim; the writer refuses it.
 		$reserve = null !== $target_path && ( ! file_exists( $target_path ) || $this->variants->owns( $target_relative ) );
 		$claimed = $reserve && empty( $variant_row['relative_path'] );
+
+		// The file already at the target may be replaced only when it is what this row recorded.
+		$owned_hash = ( $variant_row['relative_path'] ?? null ) === $target_relative && ! empty( $variant_row['file_hash'] ) ? $variant_row['file_hash'] : null;
 
 		if ( ! $this->variants->transition( $id, VariantStatus::PENDING, VariantStatus::PROCESSING, $reserve ? array( 'relative_path' => $target_relative ) : array() ) ) {
 			return OptimizeResult::skipped( 'not_pending' );
@@ -132,12 +134,16 @@ class ImageConverter {
 				)
 			);
 			wp_delete_file( $saved['path'] );
-			$this->discard_unowned_file( $target_path, $target_relative );
+
+			// The row's previous file goes; a file that is not the row's stays where it is.
+			if ( $this->writer->owns_target( $target_path, $owned_hash ) ) {
+				$this->discard_unowned_file( $target_path, $target_relative );
+			}
 
 			return OptimizeResult::skipped( $published ? 'not_smaller' : 'row_gone' );
 		}
 
-		$saved = $this->writer->publish( $saved, $target_path );
+		$saved = $this->writer->publish( $saved, $target_path, $owned_hash );
 
 		if ( is_wp_error( $saved ) ) {
 			return $this->fail( $id, $this->failure_reason( $saved ), $saved->get_error_message(), $claimed );

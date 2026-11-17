@@ -182,7 +182,7 @@ class ImageGuardTest extends WP_UnitTestCase {
 		Plugin::get_instance()->planner->plan( $id );
 
 		$plugin    = Plugin::get_instance();
-		$converter = new Stubborn_Converter( $this->variants, new AtomicImageWriter( $this->variants, new FileOwnership( $this->variants ) ), new CapabilityService() );
+		$converter = new Stubborn_Converter( $this->variants, new AtomicImageWriter( new FileOwnership( $this->variants ) ), new CapabilityService() );
 		$processor = new AttachmentProcessor( $this->attachments, $this->variants, $converter, $plugin->planner, $plugin->cleanup, new TrustOptimize\Admin\Settings(), new CapabilityService(), new DatabaseManager() );
 
 		$processor->run( $id, INF );
