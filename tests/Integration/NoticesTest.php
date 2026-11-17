@@ -157,6 +157,17 @@ class NoticesTest extends WP_UnitTestCase {
 		$this->assertStringContainsString( 'The cause is not known', $this->html() );
 	}
 
+	public function test_a_job_paused_for_an_unknown_reason_shows_the_text_a_migration_kept() {
+		$job = Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
+		$this->jobs->pause( $job->get_id(), 'unknown' );
+		$this->jobs->record_death( $job->get_id(), 'Bulk job recovered from stale running state' );
+
+		$html = $this->html();
+
+		$this->assertStringContainsString( 'Last error: Bulk job recovered from stale running state', $html );
+		$this->assertStringNotContainsString( 'The cause is not known', $html );
+	}
+
 	public function test_a_failed_resume_shows_its_error_on_the_next_page_once() {
 		$job = Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
 		$this->jobs->pause( $job->get_id(), 'stopped' );

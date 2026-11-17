@@ -343,7 +343,7 @@ class Notices {
 					/* translators: 1: why the bulk job is paused, 2: the last error of the job or a sentence saying that the cause is unknown. */
 					__( 'The bulk job is paused: %1$s. %2$s', 'trust-optimize' ),
 					$label,
-					'' !== $error && PauseReason::UNKNOWN !== $reason
+					'' !== $error
 						? sprintf(
 							/* translators: %s: the last error of the job. */
 							__( 'Last error: %s.', 'trust-optimize' ),
