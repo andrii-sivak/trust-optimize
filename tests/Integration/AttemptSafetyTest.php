@@ -379,4 +379,39 @@ class AttemptSafetyTest extends WP_UnitTestCase {
 		$this->assertSame( AttachmentState::NONE, $this->attachments->get_state( $in_job ) );
 		$this->assertSame( AttachmentState::QUEUED, $this->attachments->get_state( $alone ), 'Without a job the maintenance task repairs it.' );
 	}
+
+	public function test_after_a_release_the_next_attempt_keeps_the_file_and_ends_normally() {
+		global $wpdb;
+
+		$id   = $this->upload();
+		$stop = $this->break_queries( "status = 'done'" );
+		try {
+			Plugin::get_instance()->processor->run( $id, INF );
+		} finally {
+			$stop();
+		}
+		$open = array_values( array_filter( $this->variants->get_for_attachment( $id ), static function ( $variant ) {
+			return VariantStatus::PROCESSING === $variant['status'];
+		} ) )[0];
+		$file = wp_upload_dir()['basedir'] . '/' . $open['relative_path'];
+		$hash = hash_file( 'sha256', $file );
+
+		// The operator inspects after the attempt went silent, then confirms.
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET updated_at = %s WHERE attachment_id = %d", gmdate( 'Y-m-d H:i:s', time() - 3000 ), $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		$health  = Plugin::get_instance()->job_health;
+		$attempt = $health->attempt( $id );
+		$this->assertSame( 'publication_incomplete', $attempt['kind'] );
+		$this->assertSame( array( $open['relative_path'] ), $attempt['paths'] );
+		$this->assertSame( 'released', $health->release( $id, $attempt['token'], $attempt['since'], $attempt['lease'] ) );
+		$this->assertSame( $hash, hash_file( 'sha256', $file ), 'The release touched no file.' );
+
+		$result = Plugin::get_instance()->processor->run( $id, INF );
+
+		$after = array_column( $this->variants->get_for_attachment( $id ), null, 'id' );
+		$this->assertSame( array( VariantStatus::FAILED, 'target_exists_foreign' ), array( $after[ $open['id'] ]['status'], $after[ $open['id'] ]['reason'] ) );
+		$this->assertSame( $hash, hash_file( 'sha256', $file ), 'The file is kept for the operator.' );
+		$this->assertSame( 0, $this->attachments->get_attempts( $id ), 'The attempt ended normally, so nothing counts as a death.' );
+		$this->assertContains( $result->get_data()['state'], array( AttachmentState::PARTIAL, AttachmentState::FAILED ) );
+	}
 }

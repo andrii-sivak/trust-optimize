@@ -12,6 +12,7 @@ use TrustOptimize\Bulk\BulkJobRepository;
 use TrustOptimize\Bulk\BulkProducer;
 use TrustOptimize\Bulk\EligibilityQuery;
 use TrustOptimize\Bulk\Inventory;
+use TrustOptimize\Bulk\JobHealth;
 use TrustOptimize\Bulk\JobProgress;
 use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Domain\JobStatus;
@@ -74,6 +75,20 @@ class Command {
 	private $cleanup;
 
 	/**
+	 * Job health.
+	 *
+	 * @var JobHealth
+	 */
+	private $health;
+
+	/**
+	 * Database manager.
+	 *
+	 * @var DatabaseManager
+	 */
+	private $database;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param BulkJobRepository   $jobs        Bulk job repository.
@@ -83,8 +98,10 @@ class Command {
 	 * @param BulkProducer        $producer    Bulk job producer.
 	 * @param AttachmentProcessor $processor   Attachment processor.
 	 * @param ImageCleanupService $cleanup     Cleanup service.
+	 * @param JobHealth           $health      Job health.
+	 * @param DatabaseManager     $database    Database manager.
 	 */
-	public function __construct( BulkJobRepository $jobs, EligibilityQuery $eligibility, Inventory $inventory, JobProgress $progress, BulkProducer $producer, AttachmentProcessor $processor, ImageCleanupService $cleanup ) {
+	public function __construct( BulkJobRepository $jobs, EligibilityQuery $eligibility, Inventory $inventory, JobProgress $progress, BulkProducer $producer, AttachmentProcessor $processor, ImageCleanupService $cleanup, JobHealth $health, DatabaseManager $database ) {
 		$this->jobs        = $jobs;
 		$this->eligibility = $eligibility;
 		$this->inventory   = $inventory;
@@ -92,6 +109,8 @@ class Command {
 		$this->producer    = $producer;
 		$this->processor   = $processor;
 		$this->cleanup     = $cleanup;
+		$this->health      = $health;
+		$this->database    = $database;
 	}
 
 	/**
@@ -269,6 +288,105 @@ class Command {
 		if ( $result->is_failed() && AttachmentProcessor::SCHEMA_PENDING === $result->get_message() ) {
 			\WP_CLI::error( DatabaseManager::schema_pending_error()->get_error_message() );
 		}
+	}
+
+	/**
+	 * Free an attachment that a conversion attempt holds and that nothing else will free.
+	 *
+	 * Meant for an attachment named in the admin notice: a synchronous conversion that was killed, a conversion
+	 * started before an update of the plugin, or a publication that did not finish. The age of the record does
+	 * not prove that the process behind it has ended: make sure it has, or stop it, before you confirm.
+	 *
+	 * Without options the command only shows the attempt and the command that confirms it. It never deletes or
+	 * overwrites a file: a file that may already be the new version stays where it is, is not served while its
+	 * record is not "done", and is reported as target_exists_foreign by the next conversion.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <id>
+	 * : Attachment ID.
+	 *
+	 * [--attempt=<token>]
+	 * : The attempt to release, as shown ("legacy" for a conversion started before the update).
+	 *
+	 * [--since=<datetime>]
+	 * : The time of its last change, as shown.
+	 *
+	 * [--lease=<datetime>]
+	 * : The time its publication started, as shown, or "none".
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp trust-optimize release 123
+	 *     wp trust-optimize release 123 --attempt=legacy --since="2026-11-17 10:00:00" --lease="none"
+	 *
+	 * @param array $args       Positional arguments.
+	 * @param array $assoc_args Associative arguments.
+	 */
+	public function release( $args, array $assoc_args ) {
+		if ( ! $this->database->has_schema( '1.2.0' ) ) {
+			\WP_CLI::error( DatabaseManager::schema_pending_error()->get_error_message() );
+		}
+
+		$attachment_id = isset( $args[0] ) ? (int) $args[0] : 0;
+		$attempt       = $this->health->attempt( $attachment_id );
+
+		if ( null === $attempt ) {
+			\WP_CLI::error( sprintf( 'No conversion attempt holds attachment %d.', $attachment_id ) );
+		}
+
+		if ( ! isset( $assoc_args['attempt'] ) ) {
+			$this->show_attempt( $attempt );
+			return;
+		}
+
+		if ( ! isset( $assoc_args['since'] ) ) {
+			\WP_CLI::error( 'Use --since with the time shown by "wp trust-optimize release ' . $attachment_id . '".' );
+		}
+
+		$token = 'legacy' === $assoc_args['attempt'] ? null : (string) $assoc_args['attempt'];
+		$lease = isset( $assoc_args['lease'] ) && 'none' !== $assoc_args['lease'] ? (string) $assoc_args['lease'] : null;
+
+		switch ( $this->health->release( $attachment_id, $token, (string) $assoc_args['since'], $lease ) ) {
+			case JobHealth::RELEASED:
+				\WP_CLI::success( sprintf( 'Attachment %d is free. No file was touched; its next conversion decides what to do with a file at a variant path.', $attachment_id ) );
+				return;
+			case JobHealth::TOO_YOUNG:
+				\WP_CLI::error( 'The attempt changed less than 15 minutes ago and may still be running.' );
+				return;
+			case JobHealth::ACTION_EXISTS:
+				\WP_CLI::error( 'Action Scheduler still holds it; let its runner run.' );
+				return;
+			case JobHealth::CHANGED:
+				\WP_CLI::error( 'The attempt changed since it was inspected; inspect again.' );
+				return;
+			default:
+				\WP_CLI::error( sprintf( 'No conversion attempt holds attachment %d.', $attachment_id ) );
+		}
+	}
+
+	/**
+	 * Show an attempt and the command that releases exactly it.
+	 *
+	 * @param array $attempt Attempt as described by JobHealth.
+	 */
+	private function show_attempt( array $attempt ) {
+		$token = $attempt['token'] ?? 'legacy';
+		$lease = $attempt['lease'] ?? 'none';
+
+		\WP_CLI::log( sprintf( 'Attachment %d is held by a conversion attempt.', $attempt['attachment_id'] ) );
+		\WP_CLI::log( 'source:   ' . $attempt['source'] );
+		\WP_CLI::log( 'attempt:  ' . $token );
+		\WP_CLI::log( 'since:    ' . $attempt['since'] . ' (UTC)' );
+		\WP_CLI::log( 'attempts: ' . $attempt['attempts'] );
+		\WP_CLI::log( 'lease:    ' . $lease );
+
+		foreach ( $attempt['paths'] as $path ) {
+			\WP_CLI::log( 'variant:  ' . $path . ' (the file at this path may already be the new version while its record keeps the previous hash)' );
+		}
+
+		\WP_CLI::log( 'Make sure that process has ended or stop it; the age of the record does not prove it. Then run:' );
+		\WP_CLI::log( sprintf( 'wp trust-optimize release %d --attempt=%s --since="%s" --lease="%s"', $attempt['attachment_id'], $token, $attempt['since'], $lease ) );
 	}
 
 	/**

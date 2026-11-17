@@ -8,6 +8,7 @@
 namespace TrustOptimize\Bulk;
 
 use TrustOptimize\Database\DatabaseManager;
+use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Domain\VariantStatus;
 use TrustOptimize\Queue\ConversionQueue;
 use TrustOptimize\Storage\AttachmentRepository;
@@ -36,6 +37,31 @@ class JobHealth {
 	 * Seconds of silence after which an Action Scheduler action counts as stuck.
 	 */
 	const SIGNAL_SECONDS = 900;
+
+	/**
+	 * Outcome of release(): the attempt was ended.
+	 */
+	const RELEASED = 'released';
+
+	/**
+	 * Outcome of release(): the attachment is not held by an attempt.
+	 */
+	const NOT_HELD = 'not_held';
+
+	/**
+	 * Outcome of release(): the attempt is younger than STALE_CLAIM_SECONDS, so it may still be alive.
+	 */
+	const TOO_YOUNG = 'too_young';
+
+	/**
+	 * Outcome of release(): an Action Scheduler action of the attachment exists, or its queue cannot be asked.
+	 */
+	const ACTION_EXISTS = 'action_exists';
+
+	/**
+	 * Outcome of release(): the attempt is not the one that was inspected any more.
+	 */
+	const CHANGED = 'changed';
 
 	/**
 	 * Signal: an action has been in progress, or claimed, for too long.
@@ -172,10 +198,14 @@ class JobHealth {
 	 * Whether an action of the attachment is pending or in progress.
 	 *
 	 * @param int $attachment_id Attachment ID.
-	 * @return bool|null Null when the answer cannot be trusted (the query failed).
+	 * @return bool|null Null when the answer cannot be trusted (Action Scheduler is not ready, or the query failed).
 	 */
 	private function has_live_action( $attachment_id ) {
 		global $wpdb;
+
+		if ( ! $this->scheduler_ready() ) {
+			return null;
+		}
 
 		$wpdb->last_error = '';
 
@@ -210,36 +240,89 @@ class JobHealth {
 		$held = array();
 
 		foreach ( $this->attachments->find_held( AttachmentRepository::STALE_CLAIM_SECONDS, self::BATCH_SIZE ) as $row ) {
-			$paths = array();
-
-			if ( null !== $row['publishing_at'] ) {
-				foreach ( $this->variants->get_for_attachment( $row['attachment_id'] ) as $variant ) {
-					if ( VariantStatus::PROCESSING === $variant['status'] ) {
-						$paths[] = (string) $variant['relative_path'];
-					}
-				}
-			}
-
-			$source = $row['attempt_source'] ?? 'legacy';
-			$kind   = $source;
-
-			if ( null !== $row['publishing_at'] ) {
-				$kind = array() === $paths ? 'lease_not_released' : 'publication_incomplete';
-			}
-
-			$held[] = array(
-				'attachment_id' => $row['attachment_id'],
-				'source'        => $source,
-				'token'         => $row['attempt_token'],
-				'since'         => $row['updated_at'],
-				'attempts'      => $row['attempts'],
-				'lease'         => $row['publishing_at'],
-				'kind'          => $kind,
-				'paths'         => $paths,
-			);
+			$held[] = $this->describe_attempt( $row );
 		}
 
 		return $held;
+	}
+
+	/**
+	 * The attempt that holds an attachment, as an operator needs to see it.
+	 *
+	 * @param int $attachment_id Attachment ID.
+	 * @return array|null The array of held() for the attachment, null when no attempt holds it.
+	 */
+	public function attempt( $attachment_id ) {
+		$row = $this->attachments->get( $attachment_id );
+
+		return $row && AttachmentState::PROCESSING === $row['state'] ? $this->describe_attempt( $row ) : null;
+	}
+
+	/**
+	 * End an attempt on the operator's word.
+	 *
+	 * It refuses an attempt younger than STALE_CLAIM_SECONDS and a queue attempt that Action Scheduler still holds: the age
+	 * of a record does not prove that its process has ended, but these are the cases where it is plainly not time yet. The
+	 * attempt must be the one that was inspected; any write of a worker since then makes it a different one.
+	 *
+	 * @param int         $attachment_id Attachment ID.
+	 * @param string|null $token         Token of the inspected attempt, null for a row from before the attempt record.
+	 * @param string      $since         The attachment's updated_at when it was inspected.
+	 * @param string|null $lease         The attachment's publishing_at when it was inspected, null when none.
+	 * @return string One of the outcome constants.
+	 */
+	public function release( $attachment_id, $token, $since, $lease ) {
+		$attempt = $this->attempt( $attachment_id );
+
+		if ( null === $attempt ) {
+			return self::NOT_HELD;
+		}
+
+		if ( strtotime( $attempt['since'] . ' UTC' ) > time() - AttachmentRepository::STALE_CLAIM_SECONDS ) {
+			return self::TOO_YOUNG;
+		}
+
+		if ( AttachmentRepository::SOURCE_QUEUE === $attempt['source'] && false !== $this->has_live_action( $attachment_id ) ) {
+			return self::ACTION_EXISTS;
+		}
+
+		return $this->attachments->release( $attachment_id, $token, $since, $lease ) ? self::RELEASED : self::CHANGED;
+	}
+
+	/**
+	 * Describe a row of an attachment that an attempt holds.
+	 *
+	 * @param array $row Attachment row with attempt_source, attempt_token, attempts, updated_at and publishing_at.
+	 * @return array
+	 */
+	private function describe_attempt( array $row ) {
+		$paths = array();
+
+		if ( null !== $row['publishing_at'] ) {
+			foreach ( $this->variants->get_for_attachment( $row['attachment_id'] ) as $variant ) {
+				if ( VariantStatus::PROCESSING === $variant['status'] ) {
+					$paths[] = (string) $variant['relative_path'];
+				}
+			}
+		}
+
+		$source = $row['attempt_source'] ?? 'legacy';
+		$kind   = $source;
+
+		if ( null !== $row['publishing_at'] ) {
+			$kind = array() === $paths ? 'lease_not_released' : 'publication_incomplete';
+		}
+
+		return array(
+			'attachment_id' => $row['attachment_id'],
+			'source'        => $source,
+			'token'         => $row['attempt_token'],
+			'since'         => $row['updated_at'],
+			'attempts'      => $row['attempts'],
+			'lease'         => $row['publishing_at'],
+			'kind'          => $kind,
+			'paths'         => $paths,
+		);
 	}
 
 	/**
