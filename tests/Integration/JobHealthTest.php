@@ -330,4 +330,33 @@ class JobHealthTest extends WP_UnitTestCase {
 
 		$this->assertSame( array(), $this->health->queue_signals() );
 	}
+
+	public function test_there_are_no_signals_when_action_scheduler_cannot_answer() {
+		global $wp_actions, $wpdb;
+
+		Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
+		$action = as_enqueue_async_action( ConversionQueue::HOOK_PROCESS, array( 'attachment_id' => 1 ), ConversionQueue::GROUP );
+		$this->make_action_old( $action, 2000, ActionScheduler_Store::STATUS_RUNNING );
+		$this->assertSame( array( JobHealth::SIGNAL_STUCK_CLAIM ), $this->health->queue_signals() );
+
+		$initialised = $wp_actions['action_scheduler_init'];
+		unset( $wp_actions['action_scheduler_init'] );
+		try {
+			$this->assertSame( array(), $this->health->queue_signals(), 'Not initialised.' );
+		} finally {
+			$wp_actions['action_scheduler_init'] = $initialised;
+		}
+
+		$break = static function ( $query ) {
+			return false !== strpos( $query, 'actionscheduler_actions' ) ? 'SELECT * FROM trust_optimize_no_such_table' : $query;
+		};
+		add_filter( 'query', $break );
+		$wpdb->suppress_errors( true );
+		try {
+			$this->assertSame( array(), $this->health->queue_signals(), 'A failed query.' );
+		} finally {
+			$wpdb->suppress_errors( false );
+			remove_filter( 'query', $break );
+		}
+	}
 }

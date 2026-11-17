@@ -316,4 +316,21 @@ class ReleaseCommandTest extends WP_UnitTestCase {
 			$this->assertStringContainsString( 'A conversion of this attachment is running (source: queue, since', $error->getMessage() );
 		}
 	}
+
+	public function test_a_legacy_row_that_old_code_claimed_again_misses_the_release() {
+		global $wpdb;
+
+		$this->attachments->claim( 1011, AttachmentRepository::SOURCE_QUEUE );
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET attempt_source = NULL, attempt_token = NULL WHERE attachment_id = %d", 1011 ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		$this->age( 1011, 3000 );
+		$options = $this->confirmation_options( $this->run_release( array( '1011' ) ) );
+		$this->assertSame( 'legacy', $options['attempt'] );
+
+		// Old code takes the attachment over again: it raises the attempts and the age, and knows nothing of the token columns.
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET attempts = attempts + 1, updated_at = %s WHERE attachment_id = %d", gmdate( 'Y-m-d H:i:s', time() - 2000 ), 1011 ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+
+		$this->assertStringContainsString( 'inspect again', $this->run_release( array( '1011' ), $options ) );
+		$this->assertSame( AttachmentState::PROCESSING, $this->attachments->get_state( 1011 ) );
+	}
 }

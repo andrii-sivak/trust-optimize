@@ -414,4 +414,69 @@ class AttemptSafetyTest extends WP_UnitTestCase {
 		$this->assertSame( 0, $this->attachments->get_attempts( $id ), 'The attempt ended normally, so nothing counts as a death.' );
 		$this->assertContains( $result->get_data()['state'], array( AttachmentState::PARTIAL, AttachmentState::FAILED ) );
 	}
+
+	public function test_when_the_park_misses_because_the_job_was_resumed_the_claim_is_tried_once_more() {
+		global $wpdb;
+
+		$jobs = new BulkJobRepository( new DatabaseManager() );
+		$job  = $jobs->create( 'sync' );
+		$jobs->mark_running( $job->get_id() );
+		$id = $this->upload();
+		$this->attachments->assign_job( $id, $job->get_id() );
+		$this->assertTrue( Plugin::get_instance()->conversion_queue->enqueue( $id ) );
+		$jobs->pause( $job->get_id() );
+		$jobs_table = ( new DatabaseManager() )->get_plugin_table_names()['jobs'];
+
+		// The first claim misses because of the pause; the job is resumed right before the park runs.
+		$resume = static function ( $query ) use ( $wpdb, $jobs_table ) {
+			if ( 0 === strpos( ltrim( $query ), 'UPDATE' ) && false !== strpos( $query, "a.reason = 'paused'" ) ) {
+				$wpdb->update( $jobs_table, array( 'status' => 'running' ), array( 'status' => 'paused' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			}
+
+			return $query;
+		};
+		add_filter( 'query', $resume );
+
+		try {
+			Plugin::get_instance()->conversion_queue->process( $id );
+		} finally {
+			remove_filter( 'query', $resume );
+		}
+
+		$this->assertSame( AttachmentState::OPTIMIZED, $this->attachments->get_state( $id ), 'The second claim converted it.' );
+	}
+
+	public function test_a_release_on_the_third_attempt_gives_the_file_up_and_an_explicit_sync_keeps_the_file() {
+		global $wpdb;
+
+		$id   = $this->upload();
+		$stop = $this->break_queries( "status = 'done'" );
+		try {
+			Plugin::get_instance()->processor->run( $id, INF );
+		} finally {
+			$stop();
+		}
+		$open = array_values( array_filter( $this->variants->get_for_attachment( $id ), static function ( $variant ) {
+			return VariantStatus::PROCESSING === $variant['status'];
+		} ) )[0];
+		$file = wp_upload_dir()['basedir'] . '/' . $open['relative_path'];
+		$hash = hash_file( 'sha256', $file );
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET attempts = 3, updated_at = %s WHERE attachment_id = %d", gmdate( 'Y-m-d H:i:s', time() - 3000 ), $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		$health  = Plugin::get_instance()->job_health;
+		$attempt = $health->attempt( $id );
+
+		$this->assertSame( 'released', $health->release( $id, $attempt['token'], $attempt['since'], $attempt['lease'] ) );
+
+		$row = $this->attachments->get( $id );
+		$this->assertSame( array( AttachmentState::FAILED, 'max_attempts' ), array( $row['state'], $row['reason'] ) );
+		$this->assertSame( 'max_attempts', $this->variants->get_for_attachment( $id )[ array_search( $open['id'], array_column( $this->variants->get_for_attachment( $id ), 'id' ), true ) ]['reason'] );
+		$this->assertSame( $hash, hash_file( 'sha256', $file ) );
+
+		Plugin::get_instance()->processor->sync( $id );
+
+		$after = array_column( $this->variants->get_for_attachment( $id ), null, 'id' )[ $open['id'] ];
+		$this->assertSame( array( VariantStatus::FAILED, 'target_exists_foreign' ), array( $after['status'], $after['reason'] ) );
+		$this->assertSame( $hash, hash_file( 'sha256', $file ), 'The file at the target is unchanged.' );
+	}
 }
