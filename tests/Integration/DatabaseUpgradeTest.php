@@ -321,7 +321,9 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 			$this->assertFalse( $database->has_schema( '1.1.0' ) );
 
 			$stale = $insert( 'running', 'earlier failure', gmdate( 'Y-m-d H:i:s', time() - HOUR_IN_SECONDS ) );
-			$this->assertSame( 1, $repo->recover_stale_running( 900 ) );
+			$silent = $repo->find_stale_running( 900 );
+			$this->assertCount( 1, $silent );
+			$this->assertTrue( $repo->stop( $silent[0], 900 ) );
 			$this->assertSame( array( 'paused', "earlier failure\n" . $sentence ), array_values( $old_row( $stale ) ) );
 
 			$deactivated = $insert( 'running' );
@@ -336,11 +338,6 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 			$this->assertTrue( $repo->pause( $user ) );
 			$this->assertSame( array( 'paused', null ), array_values( $old_row( $user ) ) );
 
-			$resumed = $insert( 'running' );
-			$this->assertTrue( $repo->pause( $resumed ) );
-			$this->assertTrue( $repo->mark_running( $resumed ) );
-			$this->assertSame( 'running', $old_row( $resumed )['status'] );
-
 			$cancelled = $insert( 'running' );
 			$this->assertTrue( $repo->pause( $cancelled, 'low_disk_space' ) );
 			$this->assertTrue( $repo->cancel( $cancelled ) );
@@ -354,7 +351,6 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 				'deactivated' => array( $deactivated, 'deactivated', null ),
 				'disk'        => array( $disk, 'low_disk_space', null ),
 				'user'        => array( $user, 'user', null ),
-				'resumed'     => array( $resumed, null, null ),
 				'cancelled'   => array( $cancelled, null, null ),
 			);
 			foreach ( $expected as $label => $values ) {

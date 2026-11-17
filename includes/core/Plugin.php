@@ -151,8 +151,8 @@ class Plugin {
 		$this->processor        = new AttachmentProcessor( $attachments, $variants, $converter, $this->planner, $this->cleanup, $settings, $capabilities, $database );
 		$this->conversion_queue = new ConversionQueue( $attachments, $this->processor, $this->planner, $database );
 		$this->inventory        = new Inventory( $eligibility, $attachments, $variants, $settings, $capabilities );
-		$this->bulk_producer    = new BulkProducer( $jobs, $eligibility, $progress, $attachments, $this->conversion_queue, $this->cleanup, $this->inventory, $settings, $capabilities, $database );
-		$this->job_health       = new JobHealth( $attachments, $jobs, $this->conversion_queue, $database );
+		$this->job_health       = new JobHealth( $attachments, $jobs, $this->conversion_queue, $database, $variants );
+		$this->bulk_producer    = new BulkProducer( $jobs, $eligibility, $progress, $attachments, $this->conversion_queue, $this->cleanup, $this->inventory, $settings, $capabilities, $database, $this->job_health );
 		$statistics             = new Statistics( $this->inventory, $variants );
 		$health                 = new SiteHealth( $capabilities );
 		$this->admin            = new Admin( $settings, $attachments, $eligibility, $capabilities, $variants, $statistics, $health );
@@ -170,6 +170,7 @@ class Plugin {
 			new Lifecycle( $attachments, $this->conversion_queue ),
 			$health,
 			$this->bulk_producer,
+			$this->job_health,
 			$statistics,
 			$this->admin,
 			new Notices( $jobs, $this->bulk_producer, $capabilities, $database ),

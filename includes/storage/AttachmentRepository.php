@@ -589,6 +589,43 @@ class AttachmentRepository {
 	}
 
 	/**
+	 * Attachments that no automatic recovery may end, and that have been held for a long time.
+	 *
+	 * A synchronous attempt, or a row from before the attempt record (it has no source), is held when it has been
+	 * silent for longer than $older_than; any attempt is held when its publication lease is that old.
+	 *
+	 * @param int $older_than Seconds.
+	 * @param int $limit      Maximum number of rows.
+	 * @return array[] Rows with attachment_id, attempt_source, attempt_token, attempts, updated_at and publishing_at, oldest first.
+	 */
+	public function find_held( $older_than, $limit ) {
+		global $wpdb;
+
+		$cutoff = gmdate( 'Y-m-d H:i:s', time() - (int) $older_than );
+		$rows   = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT attachment_id, attempt_source, attempt_token, attempts, updated_at, publishing_at FROM {$this->table()} WHERE state = %s AND ( ( ( attempt_source IS NULL OR attempt_source = %s ) AND updated_at < %s ) OR publishing_at < %s ) ORDER BY updated_at ASC LIMIT %d",
+				AttachmentState::PROCESSING,
+				self::SOURCE_SYNC,
+				$cutoff,
+				$cutoff,
+				(int) $limit
+			),
+			ARRAY_A
+		);
+
+		return array_map(
+			static function ( $row ) {
+				$row['attachment_id'] = (int) $row['attachment_id'];
+				$row['attempts']      = (int) $row['attempts'];
+
+				return $row;
+			},
+			(array) $rows
+		);
+	}
+
+	/**
 	 * End an attempt that died (compare-and-set on the attempt that was observed, and on there being no lease).
 	 *
 	 * @param int         $attachment_id Attachment ID.

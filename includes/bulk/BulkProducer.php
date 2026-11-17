@@ -132,6 +132,13 @@ class BulkProducer {
 	private $database;
 
 	/**
+	 * Job health.
+	 *
+	 * @var JobHealth
+	 */
+	private $health;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param BulkJobRepository    $jobs         Job repository.
@@ -144,8 +151,9 @@ class BulkProducer {
 	 * @param Settings             $settings     Plugin settings.
 	 * @param CapabilityService    $capabilities Capability service.
 	 * @param DatabaseManager      $database     Database manager.
+	 * @param JobHealth            $health       Job health.
 	 */
-	public function __construct( BulkJobRepository $jobs, EligibilityQuery $eligibility, JobProgress $progress, AttachmentRepository $attachments, ConversionQueue $queue, ImageCleanupService $cleanup, Inventory $inventory, Settings $settings, CapabilityService $capabilities, DatabaseManager $database ) {
+	public function __construct( BulkJobRepository $jobs, EligibilityQuery $eligibility, JobProgress $progress, AttachmentRepository $attachments, ConversionQueue $queue, ImageCleanupService $cleanup, Inventory $inventory, Settings $settings, CapabilityService $capabilities, DatabaseManager $database, JobHealth $health ) {
 		$this->jobs         = $jobs;
 		$this->eligibility  = $eligibility;
 		$this->progress     = $progress;
@@ -156,21 +164,22 @@ class BulkProducer {
 		$this->settings     = $settings;
 		$this->capabilities = $capabilities;
 		$this->database     = $database;
+		$this->health       = $health;
 	}
 
 	/**
-	 * Register the producer action and the recovery of abandoned jobs.
+	 * Register the producer action.
 	 */
 	public function register() {
 		add_action( self::HOOK_PRODUCE, array( $this, 'produce' ), 10, 1 );
-		add_action( 'admin_init', array( $this, 'recover_stale_jobs' ) );
 	}
 
 	/**
 	 * Create a job and start it.
 	 *
 	 * @param string $type Job type (BulkJob::TYPE_*).
-	 * @return BulkJob|false|WP_Error False when another job is active; an error before the database update has finished.
+	 * @return BulkJob|false|WP_Error False when another job is active; an error before the database update has finished,
+	 *                                or when the first producer could not be scheduled (the job is then failed and the library free).
 	 */
 	public function launch( $type ) {
 		if ( ! $this->database->has_schema( '1.2.0' ) ) {
@@ -184,33 +193,100 @@ class BulkProducer {
 			return false;
 		}
 
-		$this->resume( $job->get_id() );
+		if ( ! $this->jobs->mark_running( $job->get_id() ) || ! $this->schedule( $job->get_id() ) ) {
+			$this->jobs->fail( $job->get_id(), 'producer could not be scheduled' );
+
+			return new WP_Error(
+				'trust_optimize_start_failed',
+				__( 'The bulk job could not be started: Action Scheduler did not accept its first task.', 'trust-optimize' ),
+				array( 'status' => 500 )
+			);
+		}
 
 		return $this->jobs->get( $job->get_id() );
 	}
 
 	/**
-	 * Start a job, or continue a paused one.
+	 * Continue a paused job.
+	 *
+	 * The order matters. The disk is checked first, and a refusal changes nothing. Then the dead attempts of the
+	 * queue are recovered, so the job shows what they cost it. Then the job is marked running, which records the
+	 * Resume; when its producer cannot be scheduled that record is undone, unless a Pause or another Resume came first.
+	 * Resuming a job that already runs only schedules a missing producer.
 	 *
 	 * @param int $job_id Job ID.
-	 * @return bool|WP_Error An error before the database update has finished.
+	 * @return bool|WP_Error False when there is no unfinished job; an error when the Resume was refused or failed.
 	 */
 	public function resume( $job_id ) {
 		if ( ! $this->database->has_schema( '1.2.0' ) ) {
 			return DatabaseManager::schema_pending_error();
 		}
 
-		if ( ! $this->jobs->mark_running( $job_id ) ) {
+		$job = $this->jobs->get( $job_id );
+
+		if ( ! $job || ! in_array( $job->get_status(), JobStatus::active(), true ) ) {
 			return false;
 		}
 
-		$this->schedule( $job_id );
+		if ( BulkJob::TYPE_SYNC === $job->get_type() && DiskSpace::is_low() ) {
+			return new WP_Error(
+				'trust_optimize_disk_low',
+				__( 'The disk is almost full. Free some space, then resume the job.', 'trust-optimize' ),
+				array( 'status' => 409 )
+			);
+		}
 
-		return true;
+		$this->health->recover_attempts();
+
+		// The recovery may have written a death into the job: what is restored after a failure is read after it.
+		$job      = $this->jobs->get( $job_id );
+		$previous = $job ? $job->to_array() : array();
+		$token    = bin2hex( random_bytes( 16 ) );
+
+		if ( ! $job || ! $this->jobs->mark_running( $job_id, $token ) ) {
+			return false;
+		}
+
+		if ( $this->schedule( $job_id ) ) {
+			return true;
+		}
+
+		return $this->resume_failed( $job_id, $token, $previous );
 	}
 
 	/**
-	 * Pause a job. Attachments already on the queue are still processed.
+	 * The error of a Resume whose producer could not be scheduled, after undoing the Resume where that is still possible.
+	 *
+	 * @param int    $job_id   Job ID.
+	 * @param string $token    Token of this Resume.
+	 * @param array  $previous The job before the Resume.
+	 * @return WP_Error
+	 */
+	private function resume_failed( $job_id, $token, array $previous ) {
+		$reverted = JobStatus::PAUSED === ( $previous['status'] ?? '' ) && $this->jobs->revert_resume( $job_id, $token, $previous );
+		$current  = $this->jobs->get( $job_id );
+		$message  = __( 'The job could not be resumed: Action Scheduler did not accept its task.', 'trust-optimize' );
+
+		if ( ! $reverted && $current ) {
+			$message .= ' ' . sprintf(
+				/* translators: %s: status of the job, such as running or paused. */
+				__( 'The job is now %s.', 'trust-optimize' ),
+				$current->get_status()
+			);
+		}
+
+		return new WP_Error(
+			'trust_optimize_resume_failed',
+			$message,
+			array(
+				'status'   => 500,
+				'reverted' => $reverted,
+			)
+		);
+	}
+
+	/**
+	 * Pause a job. Attachments already on the queue are parked when their action runs, and wait for Resume.
 	 *
 	 * @param int $job_id Job ID.
 	 * @return bool
@@ -239,15 +315,6 @@ class BulkProducer {
 		}
 
 		return $cancelled;
-	}
-
-	/**
-	 * Move jobs whose producer vanished to "paused".
-	 *
-	 * @return int Number of jobs recovered.
-	 */
-	public function recover_stale_jobs() {
-		return $this->jobs->recover_stale_running();
 	}
 
 	/**
@@ -472,18 +539,26 @@ class BulkProducer {
 	 *
 	 * @param int $job_id Job ID.
 	 * @param int $delay  Seconds from now.
+	 * @return bool True when a producer run is scheduled (a pending one counts), false when Action Scheduler refused (an ID of 0, or an exception).
 	 */
 	private function schedule( $job_id, $delay = 0 ) {
-		if ( ! function_exists( 'as_enqueue_async_action' ) || $this->has_pending_producer( $job_id ) ) {
-			return;
+		if ( ! function_exists( 'as_enqueue_async_action' ) ) {
+			return false;
 		}
 
-		if ( $delay > 0 ) {
-			as_schedule_single_action( time() + $delay, self::HOOK_PRODUCE, array( 'job_id' => (int) $job_id ), ConversionQueue::GROUP );
-			return;
+		if ( $this->has_pending_producer( $job_id ) ) {
+			return true;
 		}
 
-		as_enqueue_async_action( self::HOOK_PRODUCE, array( 'job_id' => (int) $job_id ), ConversionQueue::GROUP );
+		try {
+			if ( $delay > 0 ) {
+				return 0 !== as_schedule_single_action( time() + $delay, self::HOOK_PRODUCE, array( 'job_id' => (int) $job_id ), ConversionQueue::GROUP );
+			}
+
+			return 0 !== as_enqueue_async_action( self::HOOK_PRODUCE, array( 'job_id' => (int) $job_id ), ConversionQueue::GROUP );
+		} catch ( Throwable $throwable ) {
+			return false;
+		}
 	}
 
 	/**
