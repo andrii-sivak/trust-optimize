@@ -68,5 +68,7 @@ class PluginBootTest extends WP_UnitTestCase {
 		foreach ( $expected as $hook => $class ) {
 			$this->assertTrue( $this->is_hooked( $hook, $class ), "{$class} is not hooked to {$hook}." );
 		}
+
+		$this->assertTrue( $this->is_hooked( 'admin_init', TrustOptimize\Bulk\JobHealth::class ), 'The job health check is not hooked to admin_init.' );
 	}
 }

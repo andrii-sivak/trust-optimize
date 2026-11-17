@@ -212,6 +212,8 @@ class MaintenanceTest extends WP_UnitTestCase {
 		$id = $this->silent_worker( 2 );
 		$this->attachments->assign_job( $id, $job->get_id() );
 		$jobs->update( $job->get_id(), array( 'last_error' => 'an earlier text' ) );
+		global $wpdb;
+		$wpdb->update( ( new DatabaseManager() )->get_plugin_table_names()['jobs'], array( 'updated_at' => gmdate( 'Y-m-d H:i:s', time() - 1200 ) ), array( 'id' => $job->get_id() ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$before = $jobs->get( $job->get_id() )->to_array()['updated_at'];
 
 		$this->maintenance->run();

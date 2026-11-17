@@ -181,4 +181,17 @@ class BulkStatusRestTest extends WP_UnitTestCase {
 		$this->assertSame( 'sync', $error->get_error_data()['source'] );
 		$this->assertSame( $attachments->get( $id )['updated_at'], $error->get_error_data()['since'] );
 	}
+
+	public function test_the_job_output_leaves_out_the_record_of_the_resume() {
+		$producer = Plugin::get_instance()->bulk_producer;
+		$job      = $producer->launch( BulkJob::TYPE_SYNC );
+		$producer->pause( $job->get_id() );
+		$producer->resume( $job->get_id() );
+
+		$data = rest_do_request( new WP_REST_Request( 'GET', '/trust-optimize/v1/bulk/status' ) )->get_data()['job'];
+
+		foreach ( array( 'resumed_at', 'resume_token', 'resume_cursor_id' ) as $key ) {
+			$this->assertArrayNotHasKey( $key, $data );
+		}
+	}
 }

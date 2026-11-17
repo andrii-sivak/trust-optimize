@@ -71,6 +71,10 @@ Conversion runs in Action Scheduler tasks that are started by WP-Cron, which nee
 
 If neither WP-Cron nor a system cron runs the queue, a worker that died leaves its task claimed and nothing else is converted. The Bulk optimization tab and the admin notices then show that the queue looks stuck (no task has finished for 15 minutes, or a task has been running for that long). Start the queue as above, then resume the paused job: a job that was resumed while the queue is stuck stays running and continues by itself once the queue runs again.
 
+= An admin notice says the bulk job is paused =
+
+When a bulk job is paused for any reason except your own Pause (it stopped responding, the plugin was deactivated, the disk is almost full, or the reason is unknown), a notice names the reason and the last error and has a Resume button. Fix the cause shown, then resume.
+
 = An admin notice says an attachment is held by a conversion =
 
 A conversion that was started from WP-CLI or REST, one that started before an update of the plugin, or a publication that could not finish its last write is never ended automatically: the age of its record does not prove that its process has ended. The notice names the attachment and since when it is held. Make sure that process has ended or stop it, then run:
@@ -146,9 +150,9 @@ All routes are under `/wp-json/trust-optimize/v1/`. The status route needs the c
 * `GET /status`, `POST /bulk/inventory`, `POST /bulk/start`, `GET /bulk/status`, `POST /bulk/{pause|resume|cancel}` – library status and bulk jobs.
 * `POST /image/{id}/sync`, `POST /image/{id}/remove` – one attachment.
 
-The bulk job object of the REST API and of `wp trust-optimize status` includes `pause_reason` (`user`, `deactivated`, `low_disk_space`, `stopped`, `unknown`; null unless the job is paused), `queue_signals` (a list of `stuck_claim` and `no_progress` while a job is active; diagnostics only) and no longer includes `profile_hash`.
+The bulk job object of the REST API and of `wp trust-optimize status` includes `pause_reason` (`user`, `deactivated`, `low_disk_space`, `stopped`, `unknown`; null unless the job is paused), `queue_signals` (a list of `stuck_claim` and `no_progress` while a job is active, empty otherwise; diagnostics only; `wp trust-optimize status` prints it as a comma-separated string) and no longer includes `profile_hash`.
 
-Errors of the REST API: `trust_optimize_schema_pending` (503: the database update has not finished; syncs, bulk start and resume wait for it), `trust_optimize_attachment_busy` (409: a conversion holds the attachment; the data carries `source` and `since`), `trust_optimize_disk_low` (409: resume refused on a full disk), `trust_optimize_resume_failed` and `trust_optimize_start_failed` (500: Action Scheduler did not accept the job's task; a failed start fails the job and frees the library).
+Errors of the REST API: `trust_optimize_schema_pending` (503: the database update has not finished; syncs, bulk start and resume wait for it), `trust_optimize_attachment_busy` (409, from `POST /image/{id}/sync`: a conversion holds the attachment; the data carries `source` and `since`), `trust_optimize_disk_low` (409: resume refused on a full disk), `trust_optimize_resume_failed` and `trust_optimize_start_failed` (500: Action Scheduler did not accept the job's task; a failed start fails the job and frees the library).
 
 = Hooks =
 

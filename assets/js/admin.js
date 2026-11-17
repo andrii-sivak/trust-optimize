@@ -199,7 +199,10 @@
 			var job = response && response.job ? response.job : null;
 
 			if (!job) {
-				this.setStatusText(this.text('idle'));
+				if (!keepStatusText) {
+					this.setStatusText(this.text('idle'));
+				}
+
 				this.updateProgress(0);
 				this.updateCounters(null);
 				this.updateControls(null);
@@ -265,7 +268,7 @@
 			$table.find('.trust-optimize-pause-reason').prop('hidden', !reason);
 			$table.find('[data-field="pause_reason"]').text(reason);
 
-			var signals = $.isArray(job.queue_signals) ? job.queue_signals : [];
+			var signals = Array.isArray(job.queue_signals) ? job.queue_signals : [];
 			var signalTexts = (window.trustOptimizeAdmin.i18n || {}).queueSignals || {};
 			var explanation = $.map(signals, function(signal) {
 				return signalTexts[signal] || null;

@@ -249,4 +249,28 @@ class NoticesTest extends WP_UnitTestCase {
 		$this->downgrade( '2026-10-02 10:00:00' );
 		$this->assertStringContainsString( 'AVIF files are no longer created', $this->html() );
 	}
+
+	public function test_the_queue_and_held_texts_come_before_the_paused_job() {
+		global $wpdb;
+
+		$job = Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
+		$this->jobs->pause( $job->get_id(), 'stopped' );
+		$action = as_enqueue_async_action( ConversionQueue::HOOK_PROCESS, array( 'attachment_id' => 1 ), ConversionQueue::GROUP );
+		$wpdb->update( $wpdb->actionscheduler_actions, array( 'status' => 'in-progress', 'last_attempt_gmt' => gmdate( 'Y-m-d H:i:s', time() - 2000 ) ), array( 'action_id' => $action ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$attachments = new TrustOptimize\Storage\AttachmentRepository( new DatabaseManager(), new TrustOptimize\Storage\VariantRepository( new DatabaseManager() ) );
+		$attachments->claim( 5003, TrustOptimize\Storage\AttachmentRepository::SOURCE_SYNC );
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET updated_at = %s WHERE attachment_id = 5003", gmdate( 'Y-m-d H:i:s', time() - 5000 ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery
+
+		$html = $this->html();
+
+		$queue  = strpos( $html, 'more than 15 minutes' );
+		$held   = strpos( $html, 'attachment 5003' );
+		$paused = strpos( $html, 'The bulk job is paused' );
+		$this->assertNotFalse( $queue );
+		$this->assertNotFalse( $held );
+		$this->assertNotFalse( $paused );
+		$this->assertLessThan( $paused, $queue );
+		$this->assertLessThan( $paused, $held );
+	}
 }

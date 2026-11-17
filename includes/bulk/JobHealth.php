@@ -282,11 +282,25 @@ class JobHealth {
 			return self::TOO_YOUNG;
 		}
 
-		if ( AttachmentRepository::SOURCE_QUEUE === $attempt['source'] && false !== $this->has_live_action( $attachment_id ) ) {
+		// A row from before the attempt record may belong to a queue worker of the old code: ask the queue for it too.
+		if ( AttachmentRepository::SOURCE_SYNC !== $attempt['source'] && false !== $this->has_live_action( $attachment_id ) ) {
 			return self::ACTION_EXISTS;
 		}
 
-		return $this->attachments->release( $attachment_id, $token, $since, $lease ) ? self::RELEASED : self::CHANGED;
+		$job_id = $this->attachments->get( $attachment_id )['job_id'] ?? null;
+
+		if ( ! $this->attachments->release( $attachment_id, $token, $since, $lease ) ) {
+			return self::CHANGED;
+		}
+
+		// What recover_attempts() does after the death compare-and-set.
+		if ( null !== $job_id ) {
+			$this->jobs->record_death( (int) $job_id, sprintf( 'attachment %d, death %d of %d', $attachment_id, $attempt['attempts'], AttachmentRepository::MAX_ATTEMPTS ) );
+		}
+
+		$this->queue->schedule_recovered( $attachment_id );
+
+		return self::RELEASED;
 	}
 
 	/**

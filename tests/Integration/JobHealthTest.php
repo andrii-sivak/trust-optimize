@@ -359,4 +359,22 @@ class JobHealthTest extends WP_UnitTestCase {
 			remove_filter( 'query', $break );
 		}
 	}
+
+	public function test_a_resumed_job_that_made_progress_is_stopped_after_aging_although_its_producer_is_pending() {
+		$job = $this->resumed_job();
+		$this->attachments->assign_job( 812, $job );
+		$this->attachments->set_state( 812, AttachmentState::OPTIMIZED );
+		$this->assertNotEmpty( as_get_scheduled_actions( array( 'hook' => BulkProducer::HOOK_PRODUCE, 'status' => ActionScheduler_Store::STATUS_PENDING ), 'ids' ) );
+		$this->age_job( $job, 20 * MINUTE_IN_SECONDS );
+
+		$this->assertSame( 1, $this->health->stop_stale_jobs() );
+	}
+
+	public function test_a_resumed_remove_job_whose_cursor_moved_is_stopped_after_aging() {
+		$job = $this->resumed_job( BulkJob::TYPE_REMOVE );
+		$this->jobs->set_cursor( $job, 99 );
+		$this->age_job( $job, 20 * MINUTE_IN_SECONDS );
+
+		$this->assertSame( 1, $this->health->stop_stale_jobs() );
+	}
 }

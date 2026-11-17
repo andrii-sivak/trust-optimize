@@ -52,7 +52,10 @@ class JobProgress {
 	 * @return array
 	 */
 	public function describe( BulkJob $job ) {
-		return array_merge( $job->to_array(), $this->counters( $job ), array( 'in_flight' => $this->in_flight( $job ) ) );
+		// The record of the last Resume is for the health check, not for the output.
+		$row = array_diff_key( $job->to_array(), array_flip( array( 'resumed_at', 'resume_token', 'resume_cursor_id' ) ) );
+
+		return array_merge( $row, $this->counters( $job ), array( 'in_flight' => $this->in_flight( $job ) ) );
 	}
 
 	/**

@@ -363,8 +363,12 @@ class Command {
 			\WP_CLI::error( 'Use --since with the time shown by "wp trust-optimize release ' . $attachment_id . '".' );
 		}
 
+		if ( ! isset( $assoc_args['lease'] ) ) {
+			\WP_CLI::error( 'Use --lease with the value shown by "wp trust-optimize release ' . $attachment_id . '" ("none" when no lease is shown).' );
+		}
+
 		$token = 'legacy' === $assoc_args['attempt'] ? null : (string) $assoc_args['attempt'];
-		$lease = isset( $assoc_args['lease'] ) && 'none' !== $assoc_args['lease'] ? (string) $assoc_args['lease'] : null;
+		$lease = 'none' !== $assoc_args['lease'] ? (string) $assoc_args['lease'] : null;
 
 		switch ( $this->health->release( $attachment_id, $token, (string) $assoc_args['since'], $lease ) ) {
 			case JobHealth::RELEASED:

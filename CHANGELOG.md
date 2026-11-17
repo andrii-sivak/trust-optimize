@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A worker that died no longer blocks the queue for good. The job health check ends a queue attempt that Action Scheduler confirms dead (no pending or in-progress action, silent for 15 minutes) and queues the attachment again; after three deaths the file is given up as `max_attempts`. It runs on admin page loads, on Resume and in the hourly maintenance task, never on status requests.
 - Attempts that nothing recovers automatically (a synchronous conversion, one that started before the update, a publication that could not finish) are listed in a notice and freed by the new `wp trust-optimize release <id>` command, which first shows the attempt and never touches a file.
 - `queue_signals` (`stuck_claim`, `no_progress`) in the REST and WP-CLI job, a warning in the admin notices and on the Bulk optimization tab, and in `wp trust-optimize resume`.
+- An admin notice with a Resume button for a bulk job paused for any reason except your own Pause (stopped, deactivated, unknown, low disk space); it names the reason and the last error.
 - Error codes `trust_optimize_schema_pending`, `trust_optimize_attachment_busy`, `trust_optimize_disk_low`, `trust_optimize_resume_failed` and `trust_optimize_start_failed`.
 - A paused bulk job stores why it was paused in `pause_reason` (`user`, `deactivated`, `low_disk_space`, `stopped`, `unknown`), shown in the admin panel as "Paused because" and in the REST API and WP-CLI job output.
 
@@ -19,12 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A conversion attempt is owned by its worker: a claim is never taken over by age, every write of a worker is guarded by the attempt's token, and a file is moved into place only under a lease on the attachment row, so a worker that was recovered meanwhile cannot replace a file a newer attempt published.
 - A file is replaced only when its hash is the one the variant row recorded; any other file at a variant path is kept and the variant ends `target_exists_foreign`.
 - Attachments queued in a paused bulk job are parked when their task runs (nothing is converted while paused) and queued again by the job after Resume, wherever its cursor is; the job does not complete while they wait.
+- Cancelling a paused job queues its parked attachments, so they are not left behind; a deactivation gives back the attempt of the conversion it interrupted instead of counting it as a death.
 - A file that died three times is not queued again by a bulk run, regeneration or maintenance; an explicit sync, or a changed source file, gives it another chance.
 - A running bulk job was paused as stale after a DST change or a change of the site timezone, and a job that had really stopped could be detected as stale hours late, because job timestamps and the stale threshold used site-local time.
 - The Documentation link on the settings page, the plugin and author URIs and the link in `readme.txt` point to the renamed GitHub account; the old author profile link returned 404.
 
 ### Changed
 - Database schema 1.2.0: the attachments table gets `attempt_source`, `attempt_token` and `publishing_at`, and the jobs table gets `resumed_at`, `resume_token` and `resume_cursor_id`. Until the migration has finished, queued tasks reschedule themselves in an hour without claiming, and syncs, bulk start and Resume answer `trust_optimize_schema_pending`.
+- `POST /image/{id}/sync` on an attachment that a conversion holds now answers 409 `trust_optimize_attachment_busy` (with `source` and `since`) instead of a 200 response with a skipped/busy body; `wp trust-optimize sync-attachment` ends in an error.
+- `queue_signals` is a list in the REST API and a comma-separated string in `wp trust-optimize status`.
 - Pause now says what it does: attachments already queued are parked until Resume instead of being converted while the job is paused.
 - Database schema 1.1.0: the jobs table gets `pause_reason`, and the unused columns `processed`, `skipped`, `failed_count`, `created_count`, `deleted_count` and `profile_hash` are dropped. Progress fields are unchanged in the admin, REST and WP-CLI; the job no longer has `profile_hash`. Reasons that were stored in `last_error` (`deactivated`, `low_disk_space`) move to `pause_reason`, and stale recovery sets `pause_reason` `stopped` instead of adding its "recovered from stale running state" message to `last_error`. Replacing the plugin with an older version after this update is not supported; roll back with a consistent backup of files and database.
 - Requires WordPress 7.0 or higher (was 6.5).

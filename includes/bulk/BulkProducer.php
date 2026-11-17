@@ -210,7 +210,7 @@ class BulkProducer {
 	 * Continue a paused job.
 	 *
 	 * The order matters. The disk is checked first, and a refusal changes nothing. Then the dead attempts of the
-	 * queue are recovered, so the job shows what they cost it. Then the job is marked running, which records the
+	 * queue are recovered, so they are queued again or parked before the job runs (Resume then clears the job's last error). Then the job is marked running, which records the
 	 * Resume; when its producer cannot be scheduled that record is undone, unless a Pause or another Resume came first.
 	 * Resuming a job that already runs only schedules a missing producer.
 	 *
@@ -312,6 +312,11 @@ class BulkProducer {
 
 		if ( $cancelled ) {
 			$this->unschedule( $job_id );
+
+			// No producer will come for the attachments that wait for Resume, and Cancel leaves queued work to finish.
+			do {
+				$queued = $this->queue_parked( (int) $job_id, self::batch_size() );
+			} while ( $queued > 0 );
 		}
 
 		return $cancelled;
@@ -344,7 +349,7 @@ class BulkProducer {
 		$limit = self::batch_size();
 
 		if ( BulkJob::TYPE_SYNC === $job->get_type() ) {
-			$this->queue_parked( $job, $limit );
+			$this->queue_parked( $job->get_id(), $limit );
 		}
 
 		$ids      = $this->next_ids( $job, $limit );
@@ -438,13 +443,20 @@ class BulkProducer {
 	 * A queue action that ran while the job was paused (or after a deactivation) left its attachment parked; the cursor
 	 * has passed it, so only this brings it back.
 	 *
-	 * @param BulkJob $job   Job.
-	 * @param int     $limit Maximum number of attachments.
+	 * @param int $job_id Job ID.
+	 * @param int $limit  Maximum number of attachments.
+	 * @return int Number of attachments queued.
 	 */
-	private function queue_parked( BulkJob $job, $limit ) {
-		foreach ( $this->attachments->find_parked( $job->get_id(), $limit ) as $attachment_id ) {
-			$this->queue->enqueue( $attachment_id );
+	private function queue_parked( $job_id, $limit ) {
+		$queued = 0;
+
+		foreach ( $this->attachments->find_parked( $job_id, $limit ) as $attachment_id ) {
+			if ( $this->queue->enqueue( $attachment_id ) ) {
+				++$queued;
+			}
 		}
+
+		return $queued;
 	}
 
 	/**

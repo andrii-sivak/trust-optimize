@@ -431,7 +431,7 @@ class Notices {
 			'message' => esc_html(
 				$what . ' ' . sprintf(
 					/* translators: %d: attachment ID. */
-					__( 'Make sure that process has ended or stop it; the age of the record does not prove it; then run `wp trust-optimize release %d`.', 'trust-optimize' ),
+					__( 'Make sure that process has ended or stop it; the age of the record does not prove it; then run: wp trust-optimize release %d', 'trust-optimize' ),
 					$id
 				)
 			),

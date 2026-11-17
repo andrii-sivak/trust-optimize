@@ -529,13 +529,8 @@ class BulkJobRepository {
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery
 		return 1 === (int) $wpdb->query(
 			$wpdb->prepare(
-				'UPDATE %i SET last_error = %s WHERE id = %d AND status IN (%s, %s, %s)',
-				$this->get_table_name(),
-				$message,
-				(int) $job_id,
-				$statuses[0],
-				$statuses[1],
-				$statuses[2]
+				'UPDATE %i SET last_error = %s WHERE id = %d AND status IN (' . implode( ', ', array_fill( 0, count( $statuses ), '%s' ) ) . ')',
+				array_merge( array( $this->get_table_name(), $message, (int) $job_id ), $statuses )
 			)
 		);
 		// phpcs:enable

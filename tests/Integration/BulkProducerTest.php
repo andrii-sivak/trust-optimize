@@ -493,4 +493,20 @@ class BulkProducerTest extends WP_UnitTestCase {
 		$this->assertSame( AttachmentState::SKIPPED, $this->attachments->get_state( $big ) );
 		$this->assertSame( AttachmentState::OPTIMIZED, $this->attachments->get_state( $small ) );
 	}
+
+	public function test_cancelling_a_paused_job_queues_its_parked_attachments() {
+		$id  = $this->upload();
+		$job = $this->producer->launch( BulkJob::TYPE_SYNC );
+		$this->producer->produce( $job->get_id() );
+		$this->producer->pause( $job->get_id() );
+		ActionScheduler_QueueRunner::instance()->run();
+		$this->assertSame( 1, $this->attachments->count_parked( $job->get_id() ) );
+
+		$this->assertTrue( $this->producer->cancel( $job->get_id() ) );
+
+		$this->assertSame( AttachmentState::QUEUED, $this->attachments->get_state( $id ) );
+		$this->assertCount( 1, $this->pending( ConversionQueue::HOOK_PROCESS ) );
+		ActionScheduler_QueueRunner::instance()->run();
+		$this->assertSame( AttachmentState::OPTIMIZED, $this->attachments->get_state( $id ) );
+	}
 }

@@ -167,6 +167,18 @@ class ReleaseCommandTest extends WP_UnitTestCase {
 		$this->assertStringContainsString( 'Success', $output );
 		$this->assertSame( AttachmentState::QUEUED, $this->attachments->get_state( 1002 ) );
 		$this->assertSame( VariantStatus::PENDING, $this->variants->get_for_attachment( 1002 )[0]['status'] );
+		$this->assertCount(
+			1,
+			as_get_scheduled_actions(
+				array(
+					'hook'   => ConversionQueue::HOOK_PROCESS,
+					'status' => ActionScheduler_Store::STATUS_PENDING,
+					'args'   => array( 'attachment_id' => 1002 ),
+				),
+				'ids'
+			),
+			'A released attachment that ends queued gets its task.'
+		);
 	}
 
 	public function test_a_publication_incomplete_names_the_variant_and_is_released_to_pending() {
@@ -332,5 +344,85 @@ class ReleaseCommandTest extends WP_UnitTestCase {
 
 		$this->assertStringContainsString( 'inspect again', $this->run_release( array( '1011' ), $options ) );
 		$this->assertSame( AttachmentState::PROCESSING, $this->attachments->get_state( 1011 ) );
+	}
+
+	public function test_a_release_records_the_death_in_the_unfinished_job() {
+		$jobs = new BulkJobRepository( new DatabaseManager() );
+		$job  = $jobs->create( 'sync' );
+		$jobs->mark_running( $job->get_id() );
+		$this->attachments->claim( 1012, AttachmentRepository::SOURCE_SYNC );
+		$this->attachments->assign_job( 1012, $job->get_id() );
+		$this->age( 1012, 3000 );
+
+		$this->run_release( array( '1012' ), $this->confirmation_options( $this->run_release( array( '1012' ) ) ) );
+
+		$this->assertSame( 'attachment 1012, death 1 of 3', $jobs->get( $job->get_id() )->to_array()['last_error'] );
+	}
+
+	public function test_a_legacy_row_whose_action_scheduler_task_still_exists_is_not_released() {
+		global $wpdb;
+
+		$this->attachments->claim( 1013, AttachmentRepository::SOURCE_QUEUE );
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET attempt_source = NULL, attempt_token = NULL WHERE attachment_id = %d", 1013 ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		as_enqueue_async_action( ConversionQueue::HOOK_PROCESS, array( 'attachment_id' => 1013 ), ConversionQueue::GROUP );
+		$this->age( 1013, 3000 );
+		$options = $this->confirmation_options( $this->run_release( array( '1013' ) ) );
+
+		$this->assertStringContainsString( 'Action Scheduler still holds it', $this->run_release( array( '1013' ), $options ) );
+		$this->assertSame( AttachmentState::PROCESSING, $this->attachments->get_state( 1013 ) );
+	}
+
+	public function test_a_confirmation_without_the_lease_is_refused() {
+		$this->attachments->claim( 1014, AttachmentRepository::SOURCE_SYNC );
+		$this->age( 1014, 3000 );
+		$options = $this->confirmation_options( $this->run_release( array( '1014' ) ) );
+		unset( $options['lease'] );
+
+		$this->assertStringContainsString( 'Use --lease', $this->run_release( array( '1014' ), $options ) );
+		$this->assertSame( AttachmentState::PROCESSING, $this->attachments->get_state( 1014 ) );
+	}
+
+	public function test_syncs_on_an_unfinished_update_end_in_an_error() {
+		$id = self::factory()->attachment->create_upload_object( DIR_TESTDATA . '/images/test-image.jpg' );
+		update_option( 'trust_optimize_db_version', '1.1.0' );
+
+		$this->assertStringContainsString( 'database update has not finished', $this->run_sync( 'sync', array(), array( 'yes' => true ) ) );
+		$this->assertStringContainsString( 'database update has not finished', $this->run_sync( 'sync_attachment', array( (string) $id ) ) );
+	}
+
+	public function test_a_sync_whose_job_cannot_be_started_ends_in_the_start_error() {
+		$refuse = static function () {
+			return 0;
+		};
+		add_filter( 'pre_as_enqueue_async_action', $refuse );
+
+		try {
+			$output = $this->run_sync( 'sync', array(), array( 'yes' => true ) );
+		} finally {
+			remove_filter( 'pre_as_enqueue_async_action', $refuse );
+		}
+
+		$this->assertStringContainsString( 'could not be started', $output );
+	}
+
+	/**
+	 * Run a command method that is not release and return what it said or the message of its error.
+	 *
+	 * @param string $method     Method of Command.
+	 * @param array  $args       Positional arguments.
+	 * @param array  $assoc_args Options.
+	 * @return string
+	 */
+	private function run_sync( $method, array $args, array $assoc_args = array() ) {
+		WP_CLI::$lines = array();
+
+		try {
+			$this->command->$method( $args, $assoc_args );
+		} catch ( RuntimeException $error ) {
+			return 'Error: ' . $error->getMessage();
+		}
+
+		return implode( "\n", WP_CLI::$lines );
 	}
 }
