@@ -37,7 +37,7 @@ class ConversionQueue {
 	const SCHEMA_RETRY_SECONDS = HOUR_IN_SECONDS;
 
 	/**
-	 * Priority of tasks that continue work already started, so they run before new work.
+	 * Priority of tasks that continue work already started or that wait for the database update (Action Scheduler runs a lower number first, so these yield to default-priority tasks).
 	 */
 	const PRIORITY_RESUMED = 20;
 
@@ -153,7 +153,7 @@ class ConversionQueue {
 	}
 
 	/**
-	 * Schedule the action of an attachment a dead attempt left queued, ahead of new work.
+	 * Schedule the action of an attachment a dead attempt left queued, at priority 20.
 	 *
 	 * Nothing is scheduled for an attachment that is not queued: it was parked behind a paused bulk job or given up.
 	 *

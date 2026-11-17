@@ -150,7 +150,7 @@ class JobHealth {
 	 * Step 1: recover the queue attempts that Action Scheduler confirms dead.
 	 *
 	 * Each recovery is the death compare-and-set of the attachment repository. The attachment is queued again
-	 * (ahead of new work), parked when its bulk job is paused, or given up after its third death. A job that
+	 * (at priority 20), parked when its bulk job is paused, or given up after its third death. A job that
 	 * is not finished remembers the death in its last error.
 	 *
 	 * @return int Number of attempts recovered.

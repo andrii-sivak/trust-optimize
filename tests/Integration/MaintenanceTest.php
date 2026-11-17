@@ -100,7 +100,7 @@ class MaintenanceTest extends WP_UnitTestCase {
 		);
 	}
 
-	public function test_a_dead_worker_is_recovered_once_and_its_attachment_queued_ahead_of_new_work() {
+	public function test_a_dead_worker_is_recovered_once_and_its_attachment_queued_at_priority_20() {
 		$id = $this->silent_worker( 1 );
 
 		$this->assertSame( 1, $this->maintenance->run() );
