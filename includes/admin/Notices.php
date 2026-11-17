@@ -222,7 +222,7 @@ class Notices {
 	private function collect() {
 		$notices = array();
 
-		if ( ! $this->database->has_schema( '1.2.0' ) ) {
+		if ( ! $this->database->has_schema( DatabaseManager::SCHEMA_RECOVERY ) ) {
 			$notices[] = array(
 				'key'     => 'schema-pending',
 				'type'    => 'warning',

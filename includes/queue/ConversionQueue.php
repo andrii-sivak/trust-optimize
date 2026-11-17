@@ -178,7 +178,7 @@ class ConversionQueue {
 		$attachment_id = (int) $attachment_id;
 
 		// The claim writes columns of the newest schema: wait for the migration instead of spending an attempt.
-		if ( ! $this->database->has_schema( '1.2.0' ) ) {
+		if ( ! $this->database->has_schema( DatabaseManager::SCHEMA_RECOVERY ) ) {
 			$this->schedule( $attachment_id, self::SCHEMA_RETRY_SECONDS, self::PRIORITY_RESUMED );
 			return;
 		}

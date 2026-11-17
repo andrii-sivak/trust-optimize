@@ -139,7 +139,7 @@ class AttachmentProcessor {
 	 * @throws Throwable Whatever planning or conversion threw, after the attempt was ended as failed.
 	 */
 	public function sync( $attachment_id ) {
-		if ( ! $this->database->has_schema( '1.2.0' ) ) {
+		if ( ! $this->database->has_schema( DatabaseManager::SCHEMA_RECOVERY ) ) {
 			return OptimizeResult::failed( self::SCHEMA_PENDING );
 		}
 

@@ -182,7 +182,7 @@ class BulkProducer {
 	 *                                or when the first producer could not be scheduled (the job is then failed and the library free).
 	 */
 	public function launch( $type ) {
-		if ( ! $this->database->has_schema( '1.2.0' ) ) {
+		if ( ! $this->database->has_schema( DatabaseManager::SCHEMA_RECOVERY ) ) {
 			return DatabaseManager::schema_pending_error();
 		}
 
@@ -218,7 +218,7 @@ class BulkProducer {
 	 * @return bool|WP_Error False when there is no unfinished job; an error when the Resume was refused or failed.
 	 */
 	public function resume( $job_id ) {
-		if ( ! $this->database->has_schema( '1.2.0' ) ) {
+		if ( ! $this->database->has_schema( DatabaseManager::SCHEMA_RECOVERY ) ) {
 			return DatabaseManager::schema_pending_error();
 		}
 

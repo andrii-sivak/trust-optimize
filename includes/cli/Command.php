@@ -343,7 +343,7 @@ class Command {
 	 * @param array $assoc_args Associative arguments.
 	 */
 	public function release( $args, array $assoc_args ) {
-		if ( ! $this->database->has_schema( '1.2.0' ) ) {
+		if ( ! $this->database->has_schema( DatabaseManager::SCHEMA_RECOVERY ) ) {
 			\WP_CLI::error( DatabaseManager::schema_pending_error()->get_error_message() );
 		}
 

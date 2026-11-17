@@ -23,6 +23,16 @@ class DatabaseManager {
 	const DB_VERSION = '1.2.0';
 
 	/**
+	 * Schema version that added jobs.pause_reason.
+	 */
+	const SCHEMA_PAUSE_REASON = '1.1.0';
+
+	/**
+	 * Schema version that added the attempt record, the publication lease and the Resume record.
+	 */
+	const SCHEMA_RECOVERY = '1.2.0';
+
+	/**
 	 * Register the schema version check.
 	 */
 	public function register() {

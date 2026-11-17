@@ -156,7 +156,7 @@ class JobHealth {
 	 * @return int Number of attempts recovered.
 	 */
 	public function recover_attempts() {
-		if ( ! $this->database->has_schema( '1.2.0' ) || ! $this->scheduler_ready() ) {
+		if ( ! $this->database->has_schema( DatabaseManager::SCHEMA_RECOVERY ) || ! $this->scheduler_ready() ) {
 			return 0;
 		}
 
@@ -233,7 +233,7 @@ class JobHealth {
 	 *               The kind is "publication_incomplete" (lease set and variants still processing; paths lists them), "lease_not_released" (lease set, no variant processing), "sync" or "legacy".
 	 */
 	public function held() {
-		if ( ! $this->database->has_schema( '1.2.0' ) ) {
+		if ( ! $this->database->has_schema( DatabaseManager::SCHEMA_RECOVERY ) ) {
 			return array();
 		}
 

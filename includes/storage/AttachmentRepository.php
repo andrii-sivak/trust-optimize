@@ -416,7 +416,7 @@ class AttachmentRepository {
 		global $wpdb;
 
 		// Before the migration to 1.2.0 there is no attempt record to forget and no lease to respect.
-		if ( ! $this->database->has_schema( '1.2.0' ) ) {
+		if ( ! $this->database->has_schema( DatabaseManager::SCHEMA_RECOVERY ) ) {
 			return (int) $wpdb->query(
 				$wpdb->prepare(
 					"UPDATE {$this->table()} SET state = %s, reason = %s, updated_at = %s WHERE state IN (%s, %s)",
