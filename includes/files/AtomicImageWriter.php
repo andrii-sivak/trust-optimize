@@ -43,7 +43,7 @@ class AtomicImageWriter {
 	}
 
 	/**
-	 * Save an editor's image to a target path through a temporary file.
+	 * Write an editor's image to a temporary file next to its target.
 	 *
 	 * The temporary name ends with the target extension: WP_Image_Editor::get_output_format()
 	 * replaces an extension that does not match the MIME type.
@@ -51,9 +51,9 @@ class AtomicImageWriter {
 	 * @param WP_Image_Editor $editor      Editor holding the image.
 	 * @param string          $target_path Absolute target path inside uploads.
 	 * @param string          $mime        Expected MIME type of the output.
-	 * @return array|WP_Error Editor result with 'path' and 'file' pointing at the target.
+	 * @return array|WP_Error Editor result whose 'path' is the temporary file; hand it to publish() or delete it.
 	 */
-	public function save( WP_Image_Editor $editor, $target_path, $mime ) {
+	public function write_temporary( WP_Image_Editor $editor, $target_path, $mime ) {
 		$target_path = wp_normalize_path( $target_path );
 
 		if ( ! UploadsPath::is_inside( $target_path ) ) {
@@ -85,9 +85,24 @@ class AtomicImageWriter {
 			);
 		}
 
+		$saved['path'] = $saved_path;
+
+		return $saved;
+	}
+
+	/**
+	 * Move a temporary file into place, replacing the file at the target.
+	 *
+	 * @param array  $saved       Result of write_temporary().
+	 * @param string $target_path Absolute target path inside uploads.
+	 * @return array|WP_Error The result with 'path' and 'file' pointing at the target. On failure the temporary file is deleted.
+	 */
+	public function publish( array $saved, $target_path ) {
+		$target_path = wp_normalize_path( $target_path );
+
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename -- Atomic replace; WP_Filesystem has no equivalent.
-		if ( ! rename( $saved_path, $target_path ) ) {
-			$this->discard( $saved_path );
+		if ( ! rename( $saved['path'], $target_path ) ) {
+			$this->discard( $saved['path'] );
 			return new WP_Error( 'rename_failed', 'Could not move the generated file into place.' );
 		}
 

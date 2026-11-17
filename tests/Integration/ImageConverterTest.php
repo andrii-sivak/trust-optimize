@@ -194,21 +194,37 @@ class ImageConverterTest extends WP_UnitTestCase {
 	 * A converter whose writer runs a callback right after the file is saved.
 	 *
 	 * @param callable $after_save Called once the file is in place, before the row is updated.
+	 * @param bool     $in_place   Whether the callback runs after the move into place; otherwise right after the temporary file is written.
 	 */
-	private function converter_acting_after_save( callable $after_save ) {
-		$writer = new class( $this->variants, new FileOwnership( $this->variants ), $after_save ) extends AtomicImageWriter {
+	private function converter_acting_after_save( callable $after_save, $in_place = true ) {
+		$writer = new class( $this->variants, new FileOwnership( $this->variants ), $after_save, $in_place ) extends AtomicImageWriter {
 			private $after_save;
+			private $in_place;
 
-			public function __construct( VariantRepository $variants, FileOwnership $ownership, callable $after_save ) {
+			public function __construct( VariantRepository $variants, FileOwnership $ownership, callable $after_save, $in_place ) {
 				parent::__construct( $variants, $ownership );
 				$this->after_save = $after_save;
+				$this->in_place   = $in_place;
 			}
 
-			public function save( WP_Image_Editor $editor, $target_path, $mime ) {
-				$saved = parent::save( $editor, $target_path, $mime );
-				( $this->after_save )();
+			public function write_temporary( WP_Image_Editor $editor, $target_path, $mime ) {
+				$saved = parent::write_temporary( $editor, $target_path, $mime );
+
+				if ( ! $this->in_place ) {
+					( $this->after_save )();
+				}
 
 				return $saved;
+			}
+
+			public function publish( array $saved, $target_path ) {
+				$published = parent::publish( $saved, $target_path );
+
+				if ( $this->in_place ) {
+					( $this->after_save )();
+				}
+
+				return $published;
 			}
 		};
 
@@ -219,13 +235,15 @@ class ImageConverterTest extends WP_UnitTestCase {
 	 * A converter that drops the given variant row right after the file is saved,
 	 * as a cleanup running in another request would.
 	 *
-	 * @param int $row_id Row to delete.
+	 * @param int  $row_id   Row to delete.
+	 * @param bool $in_place Whether the row goes after the move into place; otherwise before it.
 	 */
-	private function converter_losing_the_row( $row_id ) {
+	private function converter_losing_the_row( $row_id, $in_place = true ) {
 		return $this->converter_acting_after_save(
 			function () use ( $row_id ) {
 				$this->variants->delete( $row_id );
-			}
+			},
+			$in_place
 		);
 	}
 
@@ -281,7 +299,7 @@ class ImageConverterTest extends WP_UnitTestCase {
 		);
 		$row = $this->variants->get_for_attachment( 913 )[0];
 
-		$result = $this->converter_losing_the_row( $row['id'] )->convert( $row, $this->settings( 100 ) );
+		$result = $this->converter_losing_the_row( $row['id'], false )->convert( $row, $this->settings( 100 ) );
 
 		$this->assertSame( 'row_gone', $result->get_message() );
 		$this->assertFileDoesNotExist( $this->dir . '/noise.jpg.webp' );

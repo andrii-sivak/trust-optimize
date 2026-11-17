@@ -109,7 +109,7 @@ class ImageConverter {
 
 		$editor->set_quality( $quality );
 
-		$saved = null === $target_path ? new \WP_Error( 'target_outside_uploads', 'Invalid target path.' ) : $this->writer->save( $editor, $target_path, $mime );
+		$saved = null === $target_path ? new \WP_Error( 'target_outside_uploads', 'Invalid target path.' ) : $this->writer->write_temporary( $editor, $target_path, $mime );
 
 		if ( is_wp_error( $saved ) ) {
 			return $this->fail( $id, $this->failure_reason( $saved ), $saved->get_error_message(), $claimed );
@@ -131,9 +131,16 @@ class ImageConverter {
 					'reason'           => 'not_smaller',
 				)
 			);
-			$this->discard_unowned_file( $saved['path'], $target_relative );
+			wp_delete_file( $saved['path'] );
+			$this->discard_unowned_file( $target_path, $target_relative );
 
 			return OptimizeResult::skipped( $published ? 'not_smaller' : 'row_gone' );
+		}
+
+		$saved = $this->writer->publish( $saved, $target_path );
+
+		if ( is_wp_error( $saved ) ) {
+			return $this->fail( $id, $this->failure_reason( $saved ), $saved->get_error_message(), $claimed );
 		}
 
 		$published = $this->variants->transition(
