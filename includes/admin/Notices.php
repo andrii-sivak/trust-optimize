@@ -11,6 +11,7 @@ use TrustOptimize\Bulk\BulkJobRepository;
 use TrustOptimize\Bulk\BulkProducer;
 use TrustOptimize\Capabilities\CapabilityService;
 use TrustOptimize\Domain\JobStatus;
+use TrustOptimize\Domain\PauseReason;
 
 /**
  * Class Notices
@@ -221,7 +222,7 @@ class Notices {
 		$job = $this->jobs->get_active_job();
 		$job = $job ? $job->to_array() : null;
 
-		if ( $job && JobStatus::PAUSED === $job['status'] && BulkProducer::REASON_LOW_DISK === $job['last_error'] ) {
+		if ( $job && JobStatus::PAUSED === $job['status'] && PauseReason::LOW_DISK_SPACE === ( $job['pause_reason'] ?? null ) ) {
 			return $job;
 		}
 

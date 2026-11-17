@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A paused bulk job stores why it was paused in `pause_reason` (`user`, `deactivated`, `low_disk_space`, `stopped`, `unknown`), shown in the admin panel as "Paused because" and in the REST API and WP-CLI job output.
+
 ### Fixed
 - A running bulk job was paused as stale after a DST change or a change of the site timezone, and a job that had really stopped could be detected as stale hours late, because job timestamps and the stale threshold used site-local time.
 - The Documentation link on the settings page, the plugin and author URIs and the link in `readme.txt` point to the renamed GitHub account; the old author profile link returned 404.
 
 ### Changed
+- Database schema 1.1.0: the jobs table gets `pause_reason`, and the unused columns `processed`, `skipped`, `failed_count`, `created_count`, `deleted_count` and `profile_hash` are dropped. Progress fields are unchanged in the admin, REST and WP-CLI; the job no longer has `profile_hash`. Reasons that were stored in `last_error` (`deactivated`, `low_disk_space`) move to `pause_reason`. Replacing the plugin with an older version after this update is not supported; roll back with a consistent backup of files and database.
 - Requires WordPress 7.0 or higher (was 6.5).
 - Bulk job timestamps (`started_at`, `updated_at`, `finished_at`) in the REST API and WP-CLI are now UTC, in the same `Y-m-d H:i:s` format. Values written before the update are not converted.
 

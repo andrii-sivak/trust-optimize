@@ -135,6 +135,8 @@ All routes are under `/wp-json/trust-optimize/v1/`. The status route needs the c
 * `GET /status`, `POST /bulk/inventory`, `POST /bulk/start`, `GET /bulk/status`, `POST /bulk/{pause|resume|cancel}` – library status and bulk jobs.
 * `POST /image/{id}/sync`, `POST /image/{id}/remove` – one attachment.
 
+The bulk job object includes `pause_reason` (`user`, `deactivated`, `low_disk_space`, `stopped`, `unknown`; null unless the job is paused) and no longer includes `profile_hash`.
+
 = Hooks =
 
 Filters:

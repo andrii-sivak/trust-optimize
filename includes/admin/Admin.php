@@ -13,6 +13,7 @@ use TrustOptimize\Capabilities\CapabilityService;
 use TrustOptimize\Bulk\BulkProducer;
 use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Domain\JobStatus;
+use TrustOptimize\Domain\PauseReason;
 use TrustOptimize\Health\SiteHealth;
 use TrustOptimize\Planning\VariantPlanner;
 use TrustOptimize\Settings\OptimizationSettings;
@@ -474,6 +475,14 @@ class Admin {
 							JobStatus::COMPLETED_WITH_ERRORS => __( 'Completed with errors', 'trust-optimize' ),
 							JobStatus::CANCELLED => __( 'Cancelled', 'trust-optimize' ),
 							JobStatus::FAILED    => __( 'Failed', 'trust-optimize' ),
+						),
+						'pauseReasons'      => array(
+							PauseReason::USER           => __( 'You paused it.', 'trust-optimize' ),
+							PauseReason::DEACTIVATED    => __( 'The plugin was deactivated.', 'trust-optimize' ),
+							PauseReason::LOW_DISK_SPACE => __( 'The disk is almost full.', 'trust-optimize' ),
+							PauseReason::STOPPED        => __( 'The job stopped responding.', 'trust-optimize' ),
+							PauseReason::UNKNOWN        => __( 'The reason is unknown.', 'trust-optimize' ),
+							'fallback'                  => __( 'The job was paused.', 'trust-optimize' ),
 						),
 						'confirmReset'      => __( 'Are you sure you want to reset all settings to defaults?', 'trust-optimize' ),
 						'confirmRemove'     => __( 'Remove all TrustOptimize-generated files? Originals and WordPress thumbnails will be preserved.', 'trust-optimize' ),

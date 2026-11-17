@@ -415,7 +415,8 @@ class BulkProducerTest extends WP_UnitTestCase {
 
 		$job = $this->jobs->get( $job->get_id() );
 		$this->assertSame( JobStatus::PAUSED, $job->get_status() );
-		$this->assertSame( 'low_disk_space', $job->to_array()['last_error'] );
+		$this->assertSame( 'low_disk_space', $job->to_array()['pause_reason'] );
+		$this->assertNull( $job->to_array()['last_error'] );
 		$this->assertSame( AttachmentState::NONE, $this->attachments->get_state( $id ) );
 	}
 

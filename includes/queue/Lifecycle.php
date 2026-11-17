@@ -9,6 +9,7 @@ namespace TrustOptimize\Queue;
 
 use TrustOptimize\Bulk\BulkJobRepository;
 use TrustOptimize\Database\DatabaseManager;
+use TrustOptimize\Domain\PauseReason;
 use TrustOptimize\Storage\AttachmentRepository;
 use TrustOptimize\Storage\VariantRepository;
 
@@ -81,7 +82,7 @@ class Lifecycle {
 		}
 
 		$attachments->suspend_unfinished( self::REASON );
-		( new BulkJobRepository( $database ) )->pause_unfinished( self::REASON );
+		( new BulkJobRepository( $database ) )->pause_unfinished( PauseReason::DEACTIVATED );
 	}
 
 	/**

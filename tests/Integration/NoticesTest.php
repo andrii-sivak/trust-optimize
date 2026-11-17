@@ -102,7 +102,7 @@ class NoticesTest extends WP_UnitTestCase {
 
 	public function test_a_job_paused_for_disk_space_offers_resume_and_resumes() {
 		$job = Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
-		$this->jobs->pause( $job->get_id(), BulkProducer::REASON_LOW_DISK );
+		$this->jobs->pause( $job->get_id(), 'low_disk_space' );
 
 		$html = $this->html();
 

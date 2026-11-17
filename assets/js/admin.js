@@ -250,6 +250,12 @@
 				$table.find('[data-field="' + field + '"]').text(job[field] || 0);
 			});
 
+			var reasons = (window.trustOptimizeAdmin.i18n || {}).pauseReasons || {};
+			var reason = 'paused' === job.status && job.pause_reason ? (reasons[job.pause_reason] || reasons.fallback || '') : '';
+
+			$table.find('.trust-optimize-pause-reason').prop('hidden', !reason);
+			$table.find('[data-field="pause_reason"]').text(reason);
+
 			$table.find('.trust-optimize-last-error').prop('hidden', !job.last_error);
 			$table.find('[data-field="last_error"]').text(job.last_error || '');
 		},

@@ -85,7 +85,7 @@ class LifecycleTest extends WP_UnitTestCase {
 
 		$jobs = new BulkJobRepository( new DatabaseManager() );
 		$this->assertSame( JobStatus::PAUSED, $jobs->get( $job->get_id() )->get_status() );
-		$this->assertSame( Lifecycle::REASON, $jobs->get( $job->get_id() )->to_array()['last_error'] );
+		$this->assertSame( 'deactivated', $jobs->get( $job->get_id() )->to_array()['pause_reason'] );
 		$this->assertSame( array(), as_get_scheduled_actions( array( 'hook' => BulkProducer::HOOK_PRODUCE, 'status' => ActionScheduler_Store::STATUS_PENDING ), 'ids' ) );
 
 		Lifecycle::activate();

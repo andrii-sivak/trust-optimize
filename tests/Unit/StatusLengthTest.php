@@ -10,6 +10,7 @@ namespace TrustOptimize\Tests\Unit;
 use PHPUnit\Framework\TestCase;
 use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Domain\JobStatus;
+use TrustOptimize\Domain\PauseReason;
 use TrustOptimize\Domain\VariantStatus;
 
 /**
@@ -37,9 +38,16 @@ class StatusLengthTest extends TestCase {
 		}
 	}
 
+	public function test_pause_reasons_fit_the_column() {
+		foreach ( PauseReason::all() as $reason ) {
+			$this->assertLessThanOrEqual( PauseReason::COLUMN_LENGTH, strlen( $reason ), $reason );
+		}
+	}
+
 	public function test_columns_are_at_least_32_characters() {
 		$this->assertSame( 32, VariantStatus::COLUMN_LENGTH );
 		$this->assertSame( 32, AttachmentState::COLUMN_LENGTH );
 		$this->assertSame( 32, JobStatus::COLUMN_LENGTH );
+		$this->assertSame( 32, PauseReason::COLUMN_LENGTH );
 	}
 }
