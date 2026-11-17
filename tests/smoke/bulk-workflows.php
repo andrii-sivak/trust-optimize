@@ -442,7 +442,7 @@ $trust_optimize_smoke = new class() {
 		$scope = $this->get_smoke_attachment_scope();
 		$job   = $producer->launch( BulkJob::TYPE_SYNC );
 
-		if ( ! $job || ! $scope ) {
+		if ( ! $job || is_wp_error( $job ) || ! $scope ) {
 			throw new Exception( 'Unable to launch the bulk sync smoke job.' );
 		}
 
