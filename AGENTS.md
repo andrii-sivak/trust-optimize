@@ -1,5 +1,5 @@
 <!-- bmad:context -->
-<!-- Verified 2026-11-16 against 607b5f0. Managed by bmad-project-context; edits inside this block are replaced on refresh. Keep anything you want preserved outside the markers. -->
+<!-- Verified 2026-11-17 against 0943f8c. Managed by bmad-project-context; edits inside this block are replaced on refresh. Keep anything you want preserved outside the markers. -->
 
 ## TrustOptimize
 
@@ -18,6 +18,10 @@ WordPress plugin that converts the image sizes WordPress generates into WebP and
 - Bump the plugin version only in the release commit on a `release/*` branch; every other branch adds its entry under `## [Unreleased]` in `CHANGELOG.md`.
 - The release zip contains only the paths listed in `.gitattributes`. A new top-level file or directory the plugin needs at runtime gets a `-export-ignore` line there; nothing else does.
 - Before writing a spec for, or changing, a REST route, a WP-CLI command, a settings or admin screen, activation/deactivation/uninstall code, an Action Scheduler task or a database query, load the matching WordPress skill: `wp-rest-api`, `wp-wpcli-and-ops`, `wp-plugin-development`, `wp-performance`.
+
+## Where things are
+
+- Before writing a spec for, or changing, the conversion queue, an Action Scheduler task, bulk jobs, the conversion path, file writes or deletes, format capability, the schema or multisite code, read the architecture spine `_bmad-output/planning-artifacts/architecture/architecture-trust-optimize-2026-11-16/ARCHITECTURE-SPINE.md`. Its AD rules bind and win over older notes; a change that contradicts one goes to the owner through `bmad-architecture`.
 
 ## Running and verifying
 
