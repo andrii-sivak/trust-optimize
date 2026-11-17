@@ -9,6 +9,7 @@ namespace TrustOptimize\Processing;
 
 use TrustOptimize\Admin\Settings;
 use TrustOptimize\Capabilities\CapabilityService;
+use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Domain\VariantStatus;
 use TrustOptimize\Features\Optimization\ImageConverter;
@@ -29,6 +30,11 @@ class AttachmentProcessor {
 	 * Default time budget of one run, in seconds.
 	 */
 	const DEFAULT_TIME_BUDGET = 20;
+
+	/**
+	 * Message of the failed result of a sync that waits for the database update.
+	 */
+	const SCHEMA_PENDING = 'schema_pending';
 
 	/**
 	 * Attachment repository.
@@ -80,6 +86,13 @@ class AttachmentProcessor {
 	private $cleanup;
 
 	/**
+	 * Database manager.
+	 *
+	 * @var DatabaseManager
+	 */
+	private $database;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param AttachmentRepository $attachments  Attachment repository.
@@ -89,8 +102,9 @@ class AttachmentProcessor {
 	 * @param ImageCleanupService  $cleanup      Cleanup service.
 	 * @param Settings             $settings     Plugin settings.
 	 * @param CapabilityService    $capabilities Capability service.
+	 * @param DatabaseManager      $database     Database manager.
 	 */
-	public function __construct( AttachmentRepository $attachments, VariantRepository $variants, ImageConverter $converter, VariantPlanner $planner, ImageCleanupService $cleanup, Settings $settings, CapabilityService $capabilities ) {
+	public function __construct( AttachmentRepository $attachments, VariantRepository $variants, ImageConverter $converter, VariantPlanner $planner, ImageCleanupService $cleanup, Settings $settings, CapabilityService $capabilities, DatabaseManager $database ) {
 		$this->attachments  = $attachments;
 		$this->variants     = $variants;
 		$this->converter    = $converter;
@@ -98,6 +112,7 @@ class AttachmentProcessor {
 		$this->cleanup      = $cleanup;
 		$this->settings     = $settings;
 		$this->capabilities = $capabilities;
+		$this->database     = $database;
 	}
 
 	/**
@@ -106,9 +121,13 @@ class AttachmentProcessor {
 	 * This is the synchronous path used by REST, WP-CLI and bulk jobs; the queue uses run().
 	 *
 	 * @param int $attachment_id Attachment ID.
-	 * @return OptimizeResult Data: 'state', 'deleted' (files removed) and, for a skipped attachment, 'reason'.
+	 * @return OptimizeResult Data: 'state', 'deleted' (files removed) and, for a skipped attachment, 'reason'. Failed with SCHEMA_PENDING before the database update has finished.
 	 */
 	public function sync( $attachment_id ) {
+		if ( ! $this->database->has_schema( '1.2.0' ) ) {
+			return OptimizeResult::failed( self::SCHEMA_PENDING );
+		}
+
 		// An explicit request gives a file that failed too often another chance.
 		$this->attachments->reset_attempts( $attachment_id );
 

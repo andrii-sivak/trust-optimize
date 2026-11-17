@@ -42,7 +42,7 @@ class NoticesTest extends WP_UnitTestCase {
 
 		$database      = new DatabaseManager();
 		$this->jobs    = new BulkJobRepository( $database );
-		$this->notices = new Notices( $this->jobs, Plugin::get_instance()->bulk_producer, new CapabilityService() );
+		$this->notices = new Notices( $this->jobs, Plugin::get_instance()->bulk_producer, new CapabilityService(), $database );
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
 		set_current_screen( 'plugins' );
 	}

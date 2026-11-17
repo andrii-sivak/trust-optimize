@@ -10,6 +10,7 @@ namespace TrustOptimize\Admin;
 use TrustOptimize\Bulk\BulkJobRepository;
 use TrustOptimize\Bulk\BulkProducer;
 use TrustOptimize\Capabilities\CapabilityService;
+use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Domain\JobStatus;
 use TrustOptimize\Domain\PauseReason;
 
@@ -60,16 +61,25 @@ class Notices {
 	private $capabilities;
 
 	/**
+	 * Database manager.
+	 *
+	 * @var DatabaseManager
+	 */
+	private $database;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param BulkJobRepository $jobs         Bulk job repository.
 	 * @param BulkProducer      $producer     Bulk producer.
 	 * @param CapabilityService $capabilities Capability service.
+	 * @param DatabaseManager   $database     Database manager.
 	 */
-	public function __construct( BulkJobRepository $jobs, BulkProducer $producer, CapabilityService $capabilities ) {
+	public function __construct( BulkJobRepository $jobs, BulkProducer $producer, CapabilityService $capabilities, DatabaseManager $database ) {
 		$this->jobs         = $jobs;
 		$this->producer     = $producer;
 		$this->capabilities = $capabilities;
+		$this->database     = $database;
 	}
 
 	/**
@@ -182,6 +192,14 @@ class Notices {
 	 */
 	private function collect() {
 		$notices = array();
+
+		if ( ! $this->database->has_schema( '1.2.0' ) ) {
+			$notices[] = array(
+				'key'     => 'schema-pending',
+				'type'    => 'warning',
+				'message' => esc_html__( 'The database update has not finished yet, so no image is converted and bulk jobs cannot be started or resumed. The update is retried automatically.', 'trust-optimize' ),
+			);
+		}
 
 		$paused = $this->paused_for_disk();
 

@@ -140,10 +140,10 @@ class Plugin {
 
 		$this->planner          = new VariantPlanner( $variants, $attachments, $settings, $capabilities );
 		$this->cleanup          = new ImageCleanupService( $variants, $attachments, $ownership );
-		$this->processor        = new AttachmentProcessor( $attachments, $variants, $converter, $this->planner, $this->cleanup, $settings, $capabilities );
-		$this->conversion_queue = new ConversionQueue( $attachments, $this->processor, $this->planner );
+		$this->processor        = new AttachmentProcessor( $attachments, $variants, $converter, $this->planner, $this->cleanup, $settings, $capabilities, $database );
+		$this->conversion_queue = new ConversionQueue( $attachments, $this->processor, $this->planner, $database );
 		$this->inventory        = new Inventory( $eligibility, $attachments, $variants, $settings, $capabilities );
-		$this->bulk_producer    = new BulkProducer( $jobs, $eligibility, $progress, $attachments, $this->conversion_queue, $this->cleanup, $this->inventory, $settings, $capabilities );
+		$this->bulk_producer    = new BulkProducer( $jobs, $eligibility, $progress, $attachments, $this->conversion_queue, $this->cleanup, $this->inventory, $settings, $capabilities, $database );
 		$statistics             = new Statistics( $this->inventory, $variants );
 		$health                 = new SiteHealth( $capabilities );
 		$this->admin            = new Admin( $settings, $attachments, $eligibility, $capabilities, $variants, $statistics, $health );
@@ -163,7 +163,7 @@ class Plugin {
 			$this->bulk_producer,
 			$statistics,
 			$this->admin,
-			new Notices( $jobs, $this->bulk_producer, $capabilities ),
+			new Notices( $jobs, $this->bulk_producer, $capabilities, $database ),
 			$this->rest_controller,
 		) as $component ) {
 			$component->register();

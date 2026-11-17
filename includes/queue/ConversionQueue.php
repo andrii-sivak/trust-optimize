@@ -10,6 +10,7 @@
 namespace TrustOptimize\Queue;
 
 use Throwable;
+use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Planning\VariantPlanner;
 use TrustOptimize\Processing\AttachmentProcessor;
@@ -29,6 +30,16 @@ class ConversionQueue {
 	 * Action Scheduler group name.
 	 */
 	const GROUP = 'trust-optimize';
+
+	/**
+	 * Seconds before a task that found the database update unfinished runs again.
+	 */
+	const SCHEMA_RETRY_SECONDS = HOUR_IN_SECONDS;
+
+	/**
+	 * Priority of tasks that continue work already started, so they run before new work.
+	 */
+	const PRIORITY_RESUMED = 20;
 
 	/**
 	 * Attachment repository.
@@ -52,16 +63,25 @@ class ConversionQueue {
 	private $planner;
 
 	/**
+	 * Database manager.
+	 *
+	 * @var DatabaseManager
+	 */
+	private $database;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param AttachmentRepository $attachments Attachment repository.
 	 * @param AttachmentProcessor  $processor   Attachment processor.
 	 * @param VariantPlanner       $planner     Variant planner.
+	 * @param DatabaseManager      $database    Database manager.
 	 */
-	public function __construct( AttachmentRepository $attachments, AttachmentProcessor $processor, VariantPlanner $planner ) {
+	public function __construct( AttachmentRepository $attachments, AttachmentProcessor $processor, VariantPlanner $planner, DatabaseManager $database ) {
 		$this->attachments = $attachments;
 		$this->processor   = $processor;
 		$this->planner     = $planner;
+		$this->database    = $database;
 	}
 
 	/**
@@ -141,6 +161,12 @@ class ConversionQueue {
 	public function process( $attachment_id ) {
 		$attachment_id = (int) $attachment_id;
 
+		// The claim writes columns of the newest schema: wait for the migration instead of spending an attempt.
+		if ( ! $this->database->has_schema( '1.2.0' ) ) {
+			$this->schedule( $attachment_id, self::SCHEMA_RETRY_SECONDS, self::PRIORITY_RESUMED );
+			return;
+		}
+
 		try {
 			$result = $this->processor->run( $attachment_id );
 		} catch ( Throwable $throwable ) {
@@ -190,9 +216,17 @@ class ConversionQueue {
 	 * Schedule the action for an attachment.
 	 *
 	 * @param int $attachment_id Attachment ID.
+	 * @param int $delay         Seconds from now; 0 runs it as soon as a runner is free.
+	 * @param int $priority      Action Scheduler priority; lower runs first.
 	 * @return bool
 	 */
-	private function schedule( $attachment_id ) {
-		return 0 !== as_enqueue_async_action( self::HOOK_PROCESS, array( 'attachment_id' => (int) $attachment_id ), self::GROUP );
+	private function schedule( $attachment_id, $delay = 0, $priority = 10 ) {
+		$args = array( 'attachment_id' => (int) $attachment_id );
+
+		if ( $delay > 0 ) {
+			return 0 !== as_schedule_single_action( time() + $delay, self::HOOK_PROCESS, $args, self::GROUP, false, $priority );
+		}
+
+		return 0 !== as_enqueue_async_action( self::HOOK_PROCESS, $args, self::GROUP, false, $priority );
 	}
 }

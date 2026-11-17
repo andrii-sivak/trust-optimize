@@ -14,6 +14,7 @@ use TrustOptimize\Bulk\BulkJob;
 use TrustOptimize\Bulk\BulkJobRepository;
 use TrustOptimize\Bulk\BulkProducer;
 use TrustOptimize\Bulk\JobProgress;
+use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Processing\AttachmentProcessor;
 use TrustOptimize\Service\ImageCleanupService;
 use TrustOptimize\Storage\AttachmentRepository;
@@ -383,6 +384,10 @@ class RestController extends WP_REST_Controller {
 
 		$result = $this->processor->sync( $attachment_id );
 
+		if ( $result->is_failed() && AttachmentProcessor::SCHEMA_PENDING === $result->get_message() ) {
+			return DatabaseManager::schema_pending_error();
+		}
+
 		return rest_ensure_response( $result->to_array() );
 	}
 
@@ -419,6 +424,10 @@ class RestController extends WP_REST_Controller {
 	private function create_and_start_bulk_job( $type, $request ) {
 		$job = $this->producer->launch( $type );
 
+		if ( is_wp_error( $job ) ) {
+			return $job;
+		}
+
 		if ( ! $job ) {
 			return new WP_Error(
 				'trust_optimize_active_bulk_job_exists',
@@ -452,7 +461,11 @@ class RestController extends WP_REST_Controller {
 			return rest_ensure_response( array( 'job' => null ) );
 		}
 
-		$this->producer->$action( $job->get_id() );
+		$outcome = $this->producer->$action( $job->get_id() );
+
+		if ( is_wp_error( $outcome ) ) {
+			return $outcome;
+		}
 
 		return rest_ensure_response(
 			array(

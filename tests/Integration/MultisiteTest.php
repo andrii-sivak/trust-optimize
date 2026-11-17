@@ -219,7 +219,7 @@ class MultisiteTest extends WP_UnitTestCase {
 		foreach ( $this->blog_ids as $blog_id ) {
 			$this->prepare_site( $blog_id );
 			switch_to_blog( $blog_id );
-			$this->assertSame( '1.1.0', get_option( 'trust_optimize_db_version' ) );
+			$this->assertSame( '1.2.0', get_option( 'trust_optimize_db_version' ) );
 			$this->downgrade_jobs_table();
 			restore_current_blog();
 		}
@@ -230,7 +230,7 @@ class MultisiteTest extends WP_UnitTestCase {
 		$version  = get_option( 'trust_optimize_db_version' );
 		restore_current_blog();
 
-		$this->assertSame( '1.1.0', $version );
+		$this->assertSame( '1.2.0', $version );
 		$this->assertContains( 'pause_reason', $migrated );
 		$this->assertNotContains( 'profile_hash', $migrated );
 		$this->assertNotContains( 'processed', $migrated );

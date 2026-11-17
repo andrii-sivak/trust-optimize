@@ -8,8 +8,10 @@
 namespace TrustOptimize\Bulk;
 
 use Throwable;
+use WP_Error;
 use TrustOptimize\Admin\Settings;
 use TrustOptimize\Capabilities\CapabilityService;
+use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Domain\JobStatus;
 use TrustOptimize\Domain\PauseReason;
@@ -123,6 +125,13 @@ class BulkProducer {
 	private $capabilities;
 
 	/**
+	 * Database manager.
+	 *
+	 * @var DatabaseManager
+	 */
+	private $database;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param BulkJobRepository    $jobs         Job repository.
@@ -134,8 +143,9 @@ class BulkProducer {
 	 * @param Inventory            $inventory    Inventory.
 	 * @param Settings             $settings     Plugin settings.
 	 * @param CapabilityService    $capabilities Capability service.
+	 * @param DatabaseManager      $database     Database manager.
 	 */
-	public function __construct( BulkJobRepository $jobs, EligibilityQuery $eligibility, JobProgress $progress, AttachmentRepository $attachments, ConversionQueue $queue, ImageCleanupService $cleanup, Inventory $inventory, Settings $settings, CapabilityService $capabilities ) {
+	public function __construct( BulkJobRepository $jobs, EligibilityQuery $eligibility, JobProgress $progress, AttachmentRepository $attachments, ConversionQueue $queue, ImageCleanupService $cleanup, Inventory $inventory, Settings $settings, CapabilityService $capabilities, DatabaseManager $database ) {
 		$this->jobs         = $jobs;
 		$this->eligibility  = $eligibility;
 		$this->progress     = $progress;
@@ -145,6 +155,7 @@ class BulkProducer {
 		$this->inventory    = $inventory;
 		$this->settings     = $settings;
 		$this->capabilities = $capabilities;
+		$this->database     = $database;
 	}
 
 	/**
@@ -159,9 +170,13 @@ class BulkProducer {
 	 * Create a job and start it.
 	 *
 	 * @param string $type Job type (BulkJob::TYPE_*).
-	 * @return BulkJob|false False when another job is active.
+	 * @return BulkJob|false|WP_Error False when another job is active; an error before the database update has finished.
 	 */
 	public function launch( $type ) {
+		if ( ! $this->database->has_schema( '1.2.0' ) ) {
+			return DatabaseManager::schema_pending_error();
+		}
+
 		$total = BulkJob::TYPE_REMOVE === $type ? $this->eligibility->count_plugin_managed_attachments() : $this->eligibility->count_eligible_attachments();
 		$job   = $this->jobs->create( $type, OptimizationSettings::from_options( $this->settings, $this->capabilities )->to_array(), $total );
 
@@ -178,9 +193,13 @@ class BulkProducer {
 	 * Start a job, or continue a paused one.
 	 *
 	 * @param int $job_id Job ID.
-	 * @return bool
+	 * @return bool|WP_Error An error before the database update has finished.
 	 */
 	public function resume( $job_id ) {
+		if ( ! $this->database->has_schema( '1.2.0' ) ) {
+			return DatabaseManager::schema_pending_error();
+		}
+
 		if ( ! $this->jobs->mark_running( $job_id ) ) {
 			return false;
 		}

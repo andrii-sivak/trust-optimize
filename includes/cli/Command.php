@@ -13,9 +13,11 @@ use TrustOptimize\Bulk\BulkProducer;
 use TrustOptimize\Bulk\EligibilityQuery;
 use TrustOptimize\Bulk\Inventory;
 use TrustOptimize\Bulk\JobProgress;
+use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Domain\JobStatus;
 use TrustOptimize\Processing\AttachmentProcessor;
 use TrustOptimize\Service\ImageCleanupService;
+use TrustOptimize\Value\OptimizeResult;
 
 /**
  * Class Command
@@ -234,6 +236,8 @@ class Command {
 
 		$result = $this->processor->sync( $attachment_id );
 
+		$this->stop_if_schema_pending( $result );
+
 		\WP_CLI::line( wp_json_encode( $result->to_array() ) );
 	}
 
@@ -257,6 +261,17 @@ class Command {
 	}
 
 	/**
+	 * Exit with an error when a sync could not start because the database update has not finished.
+	 *
+	 * @param OptimizeResult $result Result of AttachmentProcessor::sync().
+	 */
+	private function stop_if_schema_pending( OptimizeResult $result ) {
+		if ( $result->is_failed() && AttachmentProcessor::SCHEMA_PENDING === $result->get_message() ) {
+			\WP_CLI::error( DatabaseManager::schema_pending_error()->get_error_message() );
+		}
+	}
+
+	/**
 	 * Create a bulk job; Action Scheduler carries it out in the background.
 	 *
 	 * @param string $type       Job type.
@@ -264,6 +279,10 @@ class Command {
 	 */
 	private function run_bulk_job( $type, array $assoc_args ) {
 		$job = $this->producer->launch( $type );
+
+		if ( is_wp_error( $job ) ) {
+			\WP_CLI::error( $job->get_error_message() );
+		}
 
 		if ( ! $job ) {
 			\WP_CLI::error( 'Another bulk job is already active.' );
@@ -329,6 +348,8 @@ class Command {
 				$result = $this->processor->sync( $attachment_id );
 				$cursor = $attachment_id;
 
+				$this->stop_if_schema_pending( $result );
+
 				if ( $result->is_failed() || $result->is_partial() ) {
 					++$failed;
 				}
@@ -380,7 +401,11 @@ class Command {
 			return;
 		}
 
-		$this->producer->$action( $job->get_id() );
+		$outcome = $this->producer->$action( $job->get_id() );
+
+		if ( is_wp_error( $outcome ) ) {
+			\WP_CLI::error( $outcome->get_error_message() );
+		}
 
 		$message = sprintf( 'Job #%d %s requested.', $job->get_id(), $action );
 

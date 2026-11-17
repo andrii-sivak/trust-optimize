@@ -56,8 +56,8 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 		delete_option( 'trust_optimize_db_version' );
 		$database->check_version();
 
-		$this->assertSame( '1.1.0', DatabaseManager::DB_VERSION );
-		$this->assertSame( '1.1.0', get_option( 'trust_optimize_db_version' ) );
+		$this->assertSame( '1.2.0', DatabaseManager::DB_VERSION );
+		$this->assertSame( '1.2.0', get_option( 'trust_optimize_db_version' ) );
 		$jobs = $database->get_plugin_table_names()['jobs'];
 		$this->assertSame( 'varchar(32)', $this->column_type( $jobs, 'pause_reason' ) );
 		foreach ( array( 'processed', 'skipped', 'failed_count', 'created_count', 'deleted_count', 'profile_hash' ) as $column ) {
@@ -167,7 +167,7 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 
 			$database->check_version();
 
-			$this->assertSame( '1.1.0', get_option( 'trust_optimize_db_version' ) );
+			$this->assertSame( '1.2.0', get_option( 'trust_optimize_db_version' ) );
 			$this->assertTrue( $database->has_schema( '1.1.0' ) );
 			foreach ( array( 'processed', 'skipped', 'failed_count', 'created_count', 'deleted_count', 'profile_hash' ) as $column ) {
 				$this->assertNull( $this->column_type( $jobs, $column ), $column );
@@ -191,7 +191,7 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 			update_option( 'trust_optimize_db_version', '1.0.0' );
 			$database->check_version();
 
-			$this->assertSame( '1.1.0', get_option( 'trust_optimize_db_version' ) );
+			$this->assertSame( '1.2.0', get_option( 'trust_optimize_db_version' ) );
 			$this->assertSame( $before, $wpdb->get_results( "SELECT * FROM `{$jobs}` ORDER BY id", ARRAY_A ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
 		} finally {
 			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
@@ -225,7 +225,7 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 
 			$database->check_version();
 
-			$this->assertSame( '1.1.0', get_option( 'trust_optimize_db_version' ) );
+			$this->assertSame( '1.2.0', get_option( 'trust_optimize_db_version' ) );
 			$this->assertSame( 'user', $this->job_row( $jobs, $ids['user'] )['pause_reason'] );
 		} finally {
 			remove_filter( 'query', $break );
@@ -273,7 +273,7 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 
 			$database->check_version();
 
-			$this->assertSame( '1.1.0', get_option( 'trust_optimize_db_version' ) );
+			$this->assertSame( '1.2.0', get_option( 'trust_optimize_db_version' ) );
 			$this->assertSame( 'varchar(32)', $this->column_type( $jobs, 'pause_reason' ) );
 			foreach ( array( 'processed', 'skipped', 'failed_count', 'created_count', 'deleted_count', 'profile_hash' ) as $column ) {
 				$this->assertNull( $this->column_type( $jobs, $column ), $column );
@@ -348,7 +348,7 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 
 			$database->check_version();
 
-			$this->assertSame( '1.1.0', get_option( 'trust_optimize_db_version' ) );
+			$this->assertSame( '1.2.0', get_option( 'trust_optimize_db_version' ) );
 			$expected = array(
 				'stale'       => array( $stale, 'unknown', "earlier failure\n" . $sentence ),
 				'deactivated' => array( $deactivated, 'deactivated', null ),
@@ -364,6 +364,105 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 		} finally {
 			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
 			$wpdb->query( "DELETE FROM `{$jobs}`" );
+			update_option( 'trust_optimize_db_version', '0.0.0' );
+			$database->check_version();
+			$this->commit();
+		}
+	}
+
+	/**
+	 * Columns 1.2.0 adds, by table key.
+	 *
+	 * @var string[][]
+	 */
+	const RECOVERY_COLUMNS = array(
+		'attachments' => array( 'attempt_source', 'attempt_token', 'publishing_at' ),
+		'jobs'        => array( 'resumed_at', 'resume_token', 'resume_cursor_id' ),
+	);
+
+	/**
+	 * Take the columns of 1.2.0 away and store version 1.1.0.
+	 *
+	 * @param string[] $tables Plugin table names keyed by logical name.
+	 */
+	private function downgrade_to_1_1_0( array $tables ) {
+		global $wpdb;
+
+		foreach ( self::RECOVERY_COLUMNS as $key => $columns ) {
+			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+			$wpdb->query( "ALTER TABLE `{$tables[ $key ]}` DROP COLUMN " . implode( ', DROP COLUMN ', $columns ) );
+		}
+
+		update_option( 'trust_optimize_db_version', '1.1.0' );
+	}
+
+	private function assert_recovery_columns( array $tables ) {
+		$this->assertSame( 'varchar(16)', $this->column_type( $tables['attachments'], 'attempt_source' ) );
+		$this->assertSame( 'char(32)', $this->column_type( $tables['attachments'], 'attempt_token' ) );
+		$this->assertSame( 'datetime', $this->column_type( $tables['attachments'], 'publishing_at' ) );
+		$this->assertSame( 'datetime', $this->column_type( $tables['jobs'], 'resumed_at' ) );
+		$this->assertSame( 'char(32)', $this->column_type( $tables['jobs'], 'resume_token' ) );
+		$this->assertSame( 'bigint(20) unsigned', $this->column_type( $tables['jobs'], 'resume_cursor_id' ) );
+	}
+
+	public function test_a_1_1_0_schema_gets_the_recovery_columns_and_a_second_run_changes_nothing() {
+		global $wpdb;
+
+		$database = new DatabaseManager();
+		$tables   = $database->get_plugin_table_names();
+
+		try {
+			$this->downgrade_to_1_1_0( $tables );
+			$this->assertFalse( $database->has_schema( '1.2.0' ) );
+			$this->assertTrue( $database->has_schema( '1.1.0' ) );
+
+			$database->check_version();
+
+			$this->assertSame( '1.2.0', get_option( 'trust_optimize_db_version' ) );
+			$this->assertTrue( $database->has_schema( '1.2.0' ) );
+			$this->assert_recovery_columns( $tables );
+
+			$before = $wpdb->get_results( "SHOW CREATE TABLE `{$tables['attachments']}`", ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+			update_option( 'trust_optimize_db_version', '1.1.0' );
+			$database->check_version();
+
+			$this->assertSame( '1.2.0', get_option( 'trust_optimize_db_version' ) );
+			$this->assertSame( $before, $wpdb->get_results( "SHOW CREATE TABLE `{$tables['attachments']}`", ARRAY_A ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		} finally {
+			update_option( 'trust_optimize_db_version', '0.0.0' );
+			$database->check_version();
+			$this->commit();
+		}
+	}
+
+	public function test_a_failed_step_to_1_2_0_keeps_the_old_version_and_the_next_run_completes() {
+		global $wpdb;
+
+		$database = new DatabaseManager();
+		$tables   = $database->get_plugin_table_names();
+		$break    = static function ( $query ) {
+			return 0 === stripos( ltrim( $query ), 'ALTER TABLE' ) && false !== stripos( $query, 'attempt_token' ) ? 'SELECT 1' : $query;
+		};
+
+		try {
+			$this->downgrade_to_1_1_0( $tables );
+
+			add_filter( 'query', $break );
+			$wpdb->suppress_errors( true );
+			$database->check_version();
+			$wpdb->suppress_errors( false );
+			remove_filter( 'query', $break );
+
+			$this->assertSame( '1.1.0', get_option( 'trust_optimize_db_version' ), 'A column that did not land keeps the old version.' );
+			$this->assertNull( $this->column_type( $tables['attachments'], 'attempt_token' ) );
+
+			$database->check_version();
+
+			$this->assertSame( '1.2.0', get_option( 'trust_optimize_db_version' ) );
+			$this->assert_recovery_columns( $tables );
+		} finally {
+			remove_filter( 'query', $break );
+			$wpdb->suppress_errors( false );
 			update_option( 'trust_optimize_db_version', '0.0.0' );
 			$database->check_version();
 			$this->commit();
