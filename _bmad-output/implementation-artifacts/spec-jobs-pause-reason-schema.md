@@ -2,7 +2,8 @@
 title: 'Jobs table: pause_reason column, dead counters dropped (schema 1.1.0)'
 type: 'feature'
 created: '2026-11-17'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: 'ee7423dad688b76e673054436cddd9c588a6adfb'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -99,17 +100,17 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `includes/domain/PauseReason.php` -- add the constants -- one vocabulary for writers and readers
-- [ ] `includes/database/DatabaseManager.php` -- new schema plus repeatable `migrate_1_1_0` steps (backfill `pause_reason`, drop the six columns when present); store the version only on success -- AD-17
-- [ ] `includes/bulk/BulkJobRepository.php`, `BulkProducer.php`, `queue/Lifecycle.php`, `admin/Notices.php` -- write and read `pause_reason`, clear it when leaving `paused` -- AD-7
-- [ ] `templates/admin/admin-page.php`, `assets/js/admin.js`, `includes/admin/Admin.php` -- "Paused because" row with translated texts for the five reasons -- owner decision
-- [ ] `tests/Integration/DatabaseUpgradeTest.php` -- the matrix
+- [x] `includes/domain/PauseReason.php` -- add the constants -- one vocabulary for writers and readers
+- [x] `includes/database/DatabaseManager.php` -- new schema plus repeatable `migrate_1_1_0` steps (backfill `pause_reason`, drop the six columns when present); store the version only on success -- AD-17
+- [x] `includes/bulk/BulkJobRepository.php`, `BulkProducer.php`, `queue/Lifecycle.php`, `admin/Notices.php` -- write and read `pause_reason`, clear it when leaving `paused` -- AD-7
+- [x] `templates/admin/admin-page.php`, `assets/js/admin.js`, `includes/admin/Admin.php` -- "Paused because" row with translated texts for the five reasons -- owner decision
+- [x] `tests/Integration/DatabaseUpgradeTest.php` -- the matrix
   - Start from a real 1.0.0 jobs table: drop `pause_reason`, re-add the six columns, set the version to `1.0.0`, and insert the legacy rows of the matrix.
   - Upgrade, then run a second time.
   - Force a failed `ADD COLUMN` with a `query` filter: the version stays `1.0.0`. Remove the filter, re-run, and the migration completes at `1.1.0`.
   - DDL commits implicitly, so restore the schema and delete the rows in `finally`, as `test_a_current_schema_is_left_alone` does.
-- [ ] `tests/Integration/*`, `tests/Unit/StatusLengthTest.php` -- update the pause assertions to `pause_reason`; assert NULL after Resume and after cancel from a pause; add a stale-recovery test (`stopped`, `last_error` not appended); cover `PauseReason` lengths
-- [ ] `readme.txt`, `CHANGELOG.md` -- REST job gains `pause_reason` and loses `profile_hash`; changelog says replacing the plugin with an older version after this update is not supported, and rollback uses a consistent backup of files and database
+- [x] `tests/Integration/*`, `tests/Unit/StatusLengthTest.php` -- update the pause assertions to `pause_reason`; assert NULL after Resume and after cancel from a pause; add a stale-recovery test (`stopped`, `last_error` not appended); cover `PauseReason` lengths
+- [x] `readme.txt`, `CHANGELOG.md` -- REST job gains `pause_reason` and loses `profile_hash`; changelog says replacing the plugin with an older version after this update is not supported, and rollback uses a consistent backup of files and database
 
 **Acceptance Criteria:**
 - Given a 1.0.0 multisite network, when a subsite gets its first request after the update, then only that site's jobs table is migrated and its version is `1.1.0`.
@@ -125,6 +126,34 @@ context:
 ## Spec Change Log
 
 ## Review Triage Log
+
+Review 1 (baseline ee7423d, commits 595b4b8 + a234740). Layers: blind-hunter (BH), edge-case-hunter (EC), verification-gap (VG).
+
+| # | Source | Location | Claim | Verdict | Evidence | Route |
+|---|---|---|---|---|---|---|
+| 1 | VG gap 2 | BulkJobRepository.php recover_stale_running old-schema branch | Stale recovery on the 1.0.0 shape is untested | medium | VG pre-verified: no `recover_stale_running` call runs with the option below 1.1.0 | patch (group A) |
+| 2 | BH 3 | BulkJobRepositoryTest old-shape test | The fallback test runs on a 1.1.0 table, so a writer that still writes `pause_reason` on a real 1.0.0 table would pass; no test maps old-shape writer rows through `migrate()` | medium | Test only sets the option to `1.0.0`; table keeps `pause_reason`, lacks the six columns | patch (group A) |
+| 3 | VG gap 1 | Admin.php pauseReasons, admin-page.php row | Labels and row markup are untested | low | VG pre-verified: no test reads the localized data or the row | patch (group B) |
+| 4 | BH 11 | Admin.php pauseReasons | A future reason without a label silently shows the fallback | low | Same root cause as #3 | patch (group B) |
+| 5 | VG other | Notices.php:225 | Low-disk notice disappears while the migration is unfinished | medium | Old-shape pause writes `last_error = low_disk_space`, row has no `pause_reason`; check reads only `pause_reason`. 1.0.0 showed the notice | patch (group C) |
+| 6 | EC 2 | Notices.php:225 | Same as #5 | medium | Same as #5 | patch (group C) |
+| 7 | EC 7 | Notices.php:225 (claim) | Same as #5 | medium | Same as #5 | patch (group C) |
+| 8 | BH 2 | Notices.php:225 | Same as #5; panel shows raw code under "Last error" on old schema | medium | Panel part matches 1.0.0 behavior, not a regression; notice part as #5 | patch (group C) |
+| 9 | EC 4 | DatabaseManager migrate / BulkJobRepository is_current writers | After a failed drop the column exists and is filled, writers skip it, Resume/finish leave a stale reason, and the next migration never clears it | low | Backfill only touches paused rows with NULL reason; nothing nulls `pause_reason` on non-paused rows | patch (group D) |
+| 10 | EC 8 | BulkJobRepository.php:278,585 (claim) | Same as #9 | low | Same as #9 | patch (group D) |
+| 11 | BH 1 | DatabaseManager migrate | Same as #9, plus an old-shape low-disk pause on such a row keeps the stale `user` | low | Same root cause; clearing non-paused rows removes the stale value before a later pause | patch (group D) |
+| 12 | BH 6 | CHANGELOG.md | Stale recovery no longer writes its message to `last_error`; changelog lists only the two codes | low | Diff: stale recovery passes `$message = null` on the current schema | patch |
+| 13 | BH 7 | readme.txt:138 | `wp trust-optimize status` output also gains `pause_reason`, readme mentions REST only | low | Command.php:170/291 print `JobProgress::describe()` | patch |
+| 14 | BH 8 | Lifecycle.php:32 | Docblock says REASON is stored on paused jobs | low | Jobs now use `PauseReason::DEACTIVATED` | patch |
+| 15 | EC 1 | migrate() vs concurrent old-shape pause | A pause written between backfill and `update_option` is never mapped | low | Real but needs a pause during the one-time DDL window; group C fallback keeps the low-disk notice; fix needs a lock or a re-run | reject (rare, fix adds complexity) |
+| 16 | EC 6 | DatabaseManager.php:35-40 (claim) | Same as #15 | low | Same as #15 | reject |
+| 17 | EC 3 | backfill rules 1-2 | Ambiguous legacy row misattributed | low | Accepted in the frozen matrix ("Ambiguous legacy row") | reject (intent accepts) |
+| 18 | EC 5 | check_version | Permanent failure reruns DDL each request | low | Accepted risk in Design Notes | reject |
+| 19 | BH 5 | check_version | Permanent failure gives no log or Site Health signal | low | Real; needs a host that denies ALTER; fix adds a log or a Site Health test (new surface) | reject (rare, new surface) |
+| 20 | EC 9 | DatabaseManager migrate (claim) | Version stored without verifying attachments/variants dbDelta | low | Pre-existing: 1.0.0 stored the version after `create_tables()` unconditionally | defer |
+| 21 | BH 4 | backfill rule 3 | Plugin's own stale sentence maps to `unknown`, could be `stopped` | false | Frozen matrix maps the stale sentence to `unknown`; fix edits frozen intent | reject |
+| 22 | BH 9 | BulkJobRepository::mark_running | Concatenated format string widens the phpcs disable | low | Disable/enable scopes one statement; `$clear` is a literal; no reachable harm | reject |
+| 23 | BH 10 | BulkJobRepository::pause default, no value check | Default only used by a test; values unchecked | false | Default is set by the Code Map; every caller passes a `PauseReason` constant | reject |
 
 ## Design Notes
 
