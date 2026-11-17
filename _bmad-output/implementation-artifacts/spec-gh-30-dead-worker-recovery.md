@@ -2,7 +2,8 @@
 title: 'Dead worker recovery, safe publication, parking and Resume while the queue is stuck (#30)'
 type: 'bugfix'
 created: '2026-11-17'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '3aeafe8e9c6dc94508a820a4e922baaa5541687b'
 route: ''
 review_loop_iteration: 0
 context:
@@ -261,15 +262,15 @@ context:
 ## Tasks & Acceptance
 
 **Execution** (one commit per bullet, refactorings first):
-- [ ] `DatabaseManager.php`, `BulkJobRepository.php` -- refactor `is_current()` into `has_schema()`, no behavior change
-- [ ] `AtomicImageWriter.php`, `ImageConverter.php` + tests -- refactor into a temporary write plus `publish()`, no behavior change
-- [ ] `DatabaseManager.php`, `DatabaseUpgradeTest.php` + schema-pending paths -- schema 1.2.0: 1.0.0→1.2.0, 1.1.0→1.2.0, second run, failed step; conversion blocked before claim
-- [ ] repositories, `AttachmentProcessor`, `ImageConverter`, `ConversionQueue`, `VariantPlanner`, `Maintenance` + tests -- attempt record, sync order, death CAS, publication lease and its error outcomes, late-worker guards, poison guard
-- [ ] `AttachmentRepository`, `ConversionQueue`, `BulkProducer`, `JobProgress` + tests -- pause condition in the claim, parking, parked set picked up by the producer
-- [ ] `JobHealth.php`, `Plugin.php`, `BulkProducer.php`, `BulkJobRepository.php` + tests -- step 1, held attachments, stale step with progress since Resume, signals, Resume order, disk check, revert by token
-- [ ] `Command.php` + tests -- `release` inspection and confirmed release
-- [ ] `Notices.php`, `RestController.php`, `Command.php`, `admin.js`, `admin-page.php`, `Admin.php`, `readme.txt`, `CHANGELOG.md` + tests -- notices, errors, `queue_signals`, texts
-- [ ] `tests/Integration/*` -- the matrix. AS states are set up through the store in tests only.
+- [x] `DatabaseManager.php`, `BulkJobRepository.php` -- refactor `is_current()` into `has_schema()`, no behavior change
+- [x] `AtomicImageWriter.php`, `ImageConverter.php` + tests -- refactor into a temporary write plus `publish()`, no behavior change
+- [x] `DatabaseManager.php`, `DatabaseUpgradeTest.php` + schema-pending paths -- schema 1.2.0: 1.0.0→1.2.0, 1.1.0→1.2.0, second run, failed step; conversion blocked before claim
+- [x] repositories, `AttachmentProcessor`, `ImageConverter`, `ConversionQueue`, `VariantPlanner`, `Maintenance` + tests -- attempt record, sync order, death CAS, publication lease and its error outcomes, late-worker guards, poison guard
+- [x] `AttachmentRepository`, `ConversionQueue`, `BulkProducer`, `JobProgress` + tests -- pause condition in the claim, parking, parked set picked up by the producer
+- [x] `JobHealth.php`, `Plugin.php`, `BulkProducer.php`, `BulkJobRepository.php` + tests -- step 1, held attachments, stale step with progress since Resume, signals, Resume order, disk check, revert by token
+- [x] `Command.php` + tests -- `release` inspection and confirmed release
+- [x] `Notices.php`, `RestController.php`, `Command.php`, `admin.js`, `admin-page.php`, `Admin.php`, `readme.txt`, `CHANGELOG.md` + tests -- notices, errors, `queue_signals`, texts
+- [x] `tests/Integration/*` -- the matrix. AS states are set up through the store in tests only.
 
 **Acceptance Criteria:**
 - **Late worker.** Given T1 recovered and T2 already published V (served file hash h2), when T1's worker continues and reaches publication of V, then `hash_file()` of the served file equals h2 and the row's `file_hash`, and T1 changed no row and scheduled nothing.
@@ -284,9 +285,55 @@ context:
 
 ## Implementation Notes
 
+- JobHealth step 1 and its Maintenance wiring landed with the attempt commit (347a6a3), so no commit leaves dead attempts without recovery.
+- `BulkJobRepository::recover_stale_running()` and `BulkProducer::recover_stale_jobs()` were removed; `JobHealth::stop_stale_jobs()` applies the skip and calls `BulkJobRepository::stop()`.
+- `mark_running()` lost its pre-1.1.0 branch: Resume and start answer schema-pending before reaching it.
+- A failed variant records `source_file_size`, and a reset writes the wanted one, so `source_changed` works for failed rows (review #26).
+- `release` takes `--lease` as well as `--attempt` and `--since`, and requires it with `--attempt`.
+- REST and WP-CLI status expose `queue_signals` only; the held list is shown in notices and by `release`.
+- Two named schema constants, `DatabaseManager::SCHEMA_PAUSE_REASON` and `SCHEMA_RECOVERY`, replace the version literals.
+- `suspend_unfinished()` gives back the interrupted claim's attempt; the `attempts` assignment precedes `state` in the SET list (single-table UPDATE assignments run left to right in MySQL and MariaDB).
+- Cancel queues the job's parked set, so the Cancel sentence stays true.
+- Verified on the stand's MariaDB 10.6 only; MySQL 5.7/8 runs in CI.
+
 ## Spec Change Log
 
 ## Review Triage Log
+
+Review 1 (baseline 3aeafe8, HEAD ae741fe). Layers: blind-hunter (BH), edge-case-hunter (EC), verification-gap (VG). Patches applied in 8ef29e1, 7848996, 789864f; deferred rows #4, #21 (--now) and #24 are in deferred-work.md.
+
+| # | Source | Location | Claim | Verdict | Evidence | Route |
+|---|---|---|---|---|---|---|
+| 1 | BH, EC | BulkProducer::resume, BulkJobRepository::mark_running | Resume erases the death text step 1 just wrote | low | Behaviour follows the frozen order (step 1, then mark_running clears last_error); only the docblock promises the job "shows what they cost it" | patch (docblock) |
+| 2 | BH, EC | JobHealth::release | Release leaves a queued attachment without an action and records no death | medium | end_attempt() moves it to queued; nothing calls schedule_recovered() or record_death(); it waits for the hourly lost-queued repair after 15 more minutes | patch |
+| 3 | BH, EC | BulkProducer::cancel | Cancelling a paused job strands its parked attachments; the Cancel text says queued work is still processed | medium | cancel() only unschedules the producer; find_parked() is read by that job's producer only | patch (cancel queues the job's parked set, keeping the Cancel sentence true) |
+| 4 | BH, EC | find_death_candidates / no heartbeat | A live worker slower than 15 min on one variant is recovered and counted as a death | medium | Real, but the age rule predates this change (claim() took over after 900 s) and AD-8 forbids liveness writes on the conversion path | defer |
+| 5 | BH | JobHealth::check_admin_load, Notices, REST | Health check and signals cost queries on every admin load / poll, no memo | low | A few indexed SELECTs per load; fix adds caching state | reject |
+| 6 | BH | BulkJobRepository::record_death | Three hard-coded placeholders for JobStatus::active() | low | Breaks silently if the list changes; direct correction | patch |
+| 7 | BH | has_schema( '1.2.0' ) x9, '1.1.0' | Literal repeated past the third repetition (AGENTS.md) | low | grep confirms | patch (refactoring commit) |
+| 8 | BH | Notices::held_notice | Markdown backticks rendered literally inside esc_html | low | esc_html of `wp trust-optimize release %d` | patch; one-notice consolidation rejected (adds structure) |
+| 9 | BH, EC | assets/js/admin.js | $.isArray removed in jQuery 4 | low | Direct correction to Array.isArray | patch |
+| 10 | BH | Command::release | Missing --lease is read as "none", so a leased row loops on "inspect again" | low | $lease null => publishing_at IS NULL guard | patch (require --lease with --attempt) |
+| 11 | BH | JobHealth::recover_attempts | Death text is not translatable | low | last_error is stored data; existing worker texts are English too | reject |
+| 12 | BH | CHANGELOG.md, readme.txt | Missing: generic paused notice; REST image sync busy 200 -> 409 under Changed; CLI queue_signals is a comma-joined string | low | Diff of both files | patch |
+| 13 | BH | BulkProducer::resume on a pending job | Failed scheduling leaves a pending job running without a producer | low | Needs a job left pending by a crashed start; stale step stops it; fix adds a branch | reject |
+| 14 | BH | ImageConverter not_smaller | Previous file deleted outside the lease | low | AD-13 amended: a served file changes only inside a publication; the window is a revocation between the token-guarded skip and the delete | patch (delete under the lease) |
+| 15 | BH | REST busy message, $wpdb->last_error with custom stores, unreachable returns | Cosmetic or unlikely | low | — | reject |
+| 16 | VG | AttachmentProcessor::convert_pending attempt_lost via process() | Not exercised through run()/process() | gap | pre-verified | patch (test) |
+| 17 | VG | JobHealth::waits_for_the_queue progress clause | Not tested with a scheduled producer | gap | pre-verified | patch (test) |
+| 18 | VG | JobHealth on admin_init | Hook registration untested | gap | pre-verified | patch (test) |
+| 19 | VG | record_death keeps updated_at | Test cannot tell within one second | gap | pre-verified | patch (test) |
+| 20 | VG, EC | ImageConverter not_smaller with a file at the target | Untested; a foreign file now ends skipped/not_smaller untracked instead of target_exists_foreign, contrary to the frozen matrix ("Next attempt after release") and the refactor's "no behavior change" | medium | Size check runs before the occupied-target check since the split | patch (check the occupied target before encoding too, plus tests) |
+| 21 | VG | Command sync / sync_attachment error paths | Untested | gap | pre-verified | patch (tests); --now deferred (needs a progress-bar stub) |
+| 22 | VG | Notices::collect order | Not asserted | gap | pre-verified | patch (test) |
+| 23 | VG | suspend_unfinished old-schema branch | Untested | gap | pre-verified | patch (test) |
+| 24 | VG | Command::status queue_signals | Untested | gap | needs a WP_CLI\Utils stub; REST covers the shared method | defer |
+| 25 | VG | JobProgress::describe | resume_token, resume_cursor_id and resumed_at leak into REST and WP-CLI job output | low | to_array() returns the whole row; readme documents only queue_signals | patch (leave them out of the output) |
+| 26 | EC | VariantPlanner reset upsert | A poisoned row keeps the source_file_size from before a source change, so failed_source_changed resets attempts on every plan and the poison loop returns | high | Reset upsert omits source_file_size; death CAS does not write it | patch (reset writes the wanted source size) |
+| 27 | EC | suspend_unfinished + mark_queued guard | A live third attempt suspended by deactivation keeps attempts = 3, is never requeued and holds its job open forever | medium | Deactivation parks (AD-7: not a death) but keeps the claim's count | patch (suspension undoes the count of the attempt it interrupts) |
+| 28 | EC | JobHealth::release legacy row | A legacy row whose pre-update queue action is still live can be released | medium | AS check applies to source queue only | patch (check legacy rows too) |
+| 29 | EC | admin.js renderBulkStatus | A failed start's error is replaced by the idle text | low | !job branch ignores keepStatusText | patch |
+| 30 | EC | AttachmentProcessor::begin outside try | An exception in the reset loop leaves the row processing | low | $wpdb does not throw there | reject |
 
 ## Design Notes
 
