@@ -285,6 +285,66 @@ class BulkProducerTest extends WP_UnitTestCase {
 		$this->assertSame( AttachmentState::OPTIMIZED, $this->attachments->get_state( $id ) );
 	}
 
+	public function test_a_queued_attachment_of_a_paused_job_is_parked_and_converted_after_resume_even_behind_the_cursor() {
+		$first  = $this->upload();
+		$second = $this->upload();
+		$job    = $this->producer->launch( BulkJob::TYPE_SYNC );
+		$this->producer->produce( $job->get_id() );
+		$this->assertSame( AttachmentState::QUEUED, $this->attachments->get_state( $first ) );
+		$this->assertSame( AttachmentState::QUEUED, $this->attachments->get_state( $second ) );
+
+		// The pause arrives after the attachments were handed over and before any worker ran.
+		$this->assertTrue( $this->producer->pause( $job->get_id() ) );
+		ActionScheduler_QueueRunner::instance()->run();
+
+		foreach ( array( $first, $second ) as $id ) {
+			$row = $this->attachments->get( $id );
+			$this->assertSame( array( AttachmentState::NONE, 'paused', 0 ), array( $row['state'], $row['reason'], $row['attempts'] ), 'Nothing is converted while paused.' );
+			$this->assertSame( (string) $job->get_id(), (string) $row['job_id'] );
+		}
+		$this->assertSame( 2, $this->attachments->count_parked( $job->get_id() ) );
+		$progress = new JobProgress( $this->attachments, new TrustOptimize\Bulk\EligibilityQuery( $this->variants ) );
+		$this->assertSame( 2, $progress->in_flight( $this->jobs->get( $job->get_id() ) ), 'Parked attachments are in flight.' );
+		$this->assertSame( 0, $progress->describe( $this->jobs->get( $job->get_id() ) )['processed'] );
+
+		// Resume: the cursor is past both attachments, so only the parked set brings them back.
+		$this->assertTrue( $this->producer->resume( $job->get_id() ) );
+		$job = $this->drive( $job->get_id() );
+
+		$this->assertSame( JobStatus::COMPLETED, $job->get_status() );
+		$this->assertSame( AttachmentState::OPTIMIZED, $this->attachments->get_state( $first ) );
+		$this->assertSame( AttachmentState::OPTIMIZED, $this->attachments->get_state( $second ) );
+	}
+
+	public function test_a_job_with_a_parked_attachment_does_not_complete() {
+		$id  = $this->upload();
+		$job = $this->producer->launch( BulkJob::TYPE_SYNC );
+		$this->producer->produce( $job->get_id() );
+		$this->producer->pause( $job->get_id() );
+		ActionScheduler_QueueRunner::instance()->run();
+		// Resumed without the producer having run: its cursor is exhausted and one attachment is still parked.
+		$this->jobs->mark_running( $job->get_id() );
+		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+
+		$this->producer->produce( $job->get_id() );
+
+		$this->assertSame( JobStatus::RUNNING, $this->jobs->get( $job->get_id() )->get_status() );
+		$this->assertSame( AttachmentState::QUEUED, $this->attachments->get_state( $id ), 'The producer queued it again.' );
+		$this->assertSame( JobStatus::COMPLETED, $this->drive( $job->get_id() )->get_status() );
+		$this->assertSame( AttachmentState::OPTIMIZED, $this->attachments->get_state( $id ) );
+	}
+
+	public function test_attachments_suspended_by_a_deactivation_count_as_parked_for_their_job() {
+		$id  = $this->upload();
+		$job = $this->producer->launch( BulkJob::TYPE_SYNC );
+		$this->producer->produce( $job->get_id() );
+
+		TrustOptimize\Queue\Lifecycle::deactivate();
+
+		$this->assertSame( array( $id ), $this->attachments->find_parked( $job->get_id(), 10 ) );
+		$this->assertSame( 1, $this->attachments->count_parked( $job->get_id() ) );
+	}
+
 	public function test_a_finished_job_is_not_revived_by_resume_pause_or_cancel() {
 		$this->upload();
 		$job = $this->drive( $this->producer->launch( BulkJob::TYPE_SYNC )->get_id() );

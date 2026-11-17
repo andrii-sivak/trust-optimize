@@ -14,7 +14,8 @@ use TrustOptimize\Storage\AttachmentRepository;
  * Class JobProgress
  *
  * A sync job hands every attachment to the queue after marking it with the job ID, so its
- * progress is the number of its attachments per state. Jobs that do their work while walking
+ * progress is the number of its attachments per state. An attachment parked behind a pause has
+ * not been converted: it counts as in flight, not as processed. Jobs that do their work while walking
  * the cursor (remove, inventory) are measured against the attachments still ahead of it.
  */
 class JobProgress {
@@ -55,13 +56,13 @@ class JobProgress {
 	}
 
 	/**
-	 * Attachments of the job still waiting for or in a worker.
+	 * Attachments of the job still waiting for or in a worker, or parked until Resume.
 	 *
 	 * @param BulkJob $job Job.
 	 * @return int
 	 */
 	public function in_flight( BulkJob $job ) {
-		return $this->waiting( $this->states( $job ) );
+		return $this->waiting( $this->states( $job ) ) + $this->parked( $job );
 	}
 
 	/**
@@ -94,7 +95,7 @@ class JobProgress {
 		if ( BulkJob::TYPE_SYNC === $job->get_type() ) {
 			$states = $this->states( $job );
 
-			$counters['processed']     = array_sum( $states ) - $this->waiting( $states );
+			$counters['processed']     = array_sum( $states ) - $this->waiting( $states ) - $this->parked( $job );
 			$counters['skipped']       = $states[ AttachmentState::SKIPPED ] ?? 0;
 			$counters['failed_count']  = ( $states[ AttachmentState::FAILED ] ?? 0 ) + ( $states[ AttachmentState::PARTIAL ] ?? 0 );
 			$counters['created_count'] = ( $states[ AttachmentState::OPTIMIZED ] ?? 0 ) + ( $states[ AttachmentState::PARTIAL ] ?? 0 );
@@ -126,6 +127,16 @@ class JobProgress {
 	 */
 	private function waiting( array $states ) {
 		return ( $states[ AttachmentState::QUEUED ] ?? 0 ) + ( $states[ AttachmentState::PROCESSING ] ?? 0 );
+	}
+
+	/**
+	 * Attachments of a sync job that wait for Resume; their state is "none", like an attachment that was not handed over yet.
+	 *
+	 * @param BulkJob $job Job.
+	 * @return int
+	 */
+	private function parked( BulkJob $job ) {
+		return BulkJob::TYPE_SYNC === $job->get_type() ? $this->attachments->count_parked( $job->get_id() ) : 0;
 	}
 
 	/**

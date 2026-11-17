@@ -274,7 +274,12 @@ class BulkProducer {
 			}
 		}
 
-		$limit    = self::batch_size();
+		$limit = self::batch_size();
+
+		if ( BulkJob::TYPE_SYNC === $job->get_type() ) {
+			$this->queue_parked( $job, $limit );
+		}
+
 		$ids      = $this->next_ids( $job, $limit );
 		$deadline = microtime( true ) + max( 1, (int) apply_filters( 'trust_optimize_bulk_time_budget', self::DEFAULT_TIME_BUDGET ) );
 		$handled  = 0;
@@ -361,6 +366,21 @@ class BulkProducer {
 	}
 
 	/**
+	 * Queue the attachments of the job that wait for Resume, wherever the cursor is.
+	 *
+	 * A queue action that ran while the job was paused (or after a deactivation) left its attachment parked; the cursor
+	 * has passed it, so only this brings it back.
+	 *
+	 * @param BulkJob $job   Job.
+	 * @param int     $limit Maximum number of attachments.
+	 */
+	private function queue_parked( BulkJob $job, $limit ) {
+		foreach ( $this->attachments->find_parked( $job->get_id(), $limit ) as $attachment_id ) {
+			$this->queue->enqueue( $attachment_id );
+		}
+	}
+
+	/**
 	 * Next attachment IDs after the cursor, for the type of the job.
 	 *
 	 * @param BulkJob $job   Job.
@@ -376,7 +396,7 @@ class BulkProducer {
 	}
 
 	/**
-	 * The cursor is exhausted: complete the job, or wait for its tasks on the queue.
+	 * The cursor is exhausted: complete the job, or wait for its tasks on the queue and for the attachments parked until Resume.
 	 *
 	 * @param BulkJob $job Job.
 	 */

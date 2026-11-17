@@ -508,6 +508,51 @@ class AttachmentRepository {
 	}
 
 	/**
+	 * Attachments of a job that wait for Resume: parked behind its pause, or suspended by a deactivation.
+	 *
+	 * @param int $job_id Job ID.
+	 * @param int $limit  Maximum number of IDs.
+	 * @return int[] Attachment IDs in ascending order.
+	 */
+	public function find_parked( $job_id, $limit ) {
+		global $wpdb;
+
+		return array_map(
+			'intval',
+			$wpdb->get_col(
+				$wpdb->prepare(
+					"SELECT attachment_id FROM {$this->table()} WHERE job_id = %d AND state = %s AND reason IN (%s, %s) ORDER BY attachment_id ASC LIMIT %d",
+					(int) $job_id,
+					AttachmentState::NONE,
+					self::REASON_PAUSED,
+					self::REASON_DEACTIVATED,
+					(int) $limit
+				)
+			)
+		);
+	}
+
+	/**
+	 * Number of attachments of a job that wait for Resume (see find_parked()).
+	 *
+	 * @param int $job_id Job ID.
+	 * @return int
+	 */
+	public function count_parked( $job_id ) {
+		global $wpdb;
+
+		return (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$this->table()} WHERE job_id = %d AND state = %s AND reason IN (%s, %s)",
+				(int) $job_id,
+				AttachmentState::NONE,
+				self::REASON_PAUSED,
+				self::REASON_DEACTIVATED
+			)
+		);
+	}
+
+	/**
 	 * Attachments that were claimed by a queue worker and have not been touched for a while, without a lease.
 	 *
 	 * These are the candidates of the death compare-and-set; the caller asks the queue whether a task still owns them.
