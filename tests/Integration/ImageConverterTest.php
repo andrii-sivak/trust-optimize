@@ -466,4 +466,64 @@ class ImageConverterTest extends WP_UnitTestCase {
 
 		$this->assertSame( $before, wp_get_attachment_metadata( $id ) );
 	}
+
+	/**
+	 * A noisy source that WebP cannot make smaller.
+	 *
+	 * @param string $name          File name.
+	 * @param int    $attachment_id Attachment ID.
+	 * @param array  $row_fields    Further columns of the pending row.
+	 * @return array The row.
+	 */
+	private function noisy_source( $name, $attachment_id, array $row_fields = array() ) {
+		$im = imagecreatetruecolor( 64, 64 );
+		for ( $x = 0; $x < 64; $x++ ) {
+			for ( $y = 0; $y < 64; $y++ ) {
+				imagesetpixel( $im, $x, $y, imagecolorallocate( $im, wp_rand( 0, 255 ), wp_rand( 0, 255 ), wp_rand( 0, 255 ) ) );
+			}
+		}
+		imagejpeg( $im, $this->dir . '/' . $name, 5 );
+		$this->variants->upsert(
+			array(
+				'attachment_id'        => $attachment_id,
+				'size_name'            => 'original',
+				'format'               => 'webp',
+				'source_relative_path' => $this->relative_dir . '/' . $name,
+			) + $row_fields
+		);
+
+		return $this->variants->get_for_attachment( $attachment_id )[0];
+	}
+
+	public function test_a_reset_row_whose_output_is_not_smaller_removes_its_own_previous_file_under_the_lease() {
+		file_put_contents( $this->dir . '/noise.jpg.webp', 'previous variant' );
+		$row = $this->noisy_source(
+			'noise.jpg',
+			930,
+			array(
+				'relative_path' => $this->relative_dir . '/noise.jpg.webp',
+				'file_hash'     => hash( 'sha256', 'previous variant' ),
+			)
+		);
+
+		$result = $this->convert_row( $this->converter, $row, $this->settings( 100 ) );
+
+		$this->assertSame( 'not_smaller', $result->get_message() );
+		$this->assertFileDoesNotExist( $this->dir . '/noise.jpg.webp' );
+		$after = $this->variants->get_for_attachment( 930 )[0];
+		$this->assertSame( array( VariantStatus::SKIPPED, null ), array( $after['status'], $after['relative_path'] ) );
+		$this->assertNull( $this->attachments->get( 930 )['publishing_at'], 'The lease is given back.' );
+	}
+
+	public function test_a_foreign_file_at_the_target_of_a_variant_that_is_not_smaller_is_kept_and_reported() {
+		file_put_contents( $this->dir . '/noise.jpg.webp', 'foreign' );
+		$row = $this->noisy_source( 'noise.jpg', 931 );
+
+		$result = $this->convert_row( $this->converter, $row, $this->settings( 100 ) );
+
+		$this->assertTrue( $result->is_failed() );
+		$after = $this->variants->get_for_attachment( 931 )[0];
+		$this->assertSame( array( VariantStatus::FAILED, 'target_exists_foreign' ), array( $after['status'], $after['reason'] ) );
+		$this->assertSame( 'foreign', file_get_contents( $this->dir . '/noise.jpg.webp' ) );
+	}
 }

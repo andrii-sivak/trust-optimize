@@ -215,4 +215,35 @@ class VariantPlannerTest extends WP_UnitTestCase {
 		$this->assertSame( AttachmentState::PROCESSING, $this->attachments->get_state( $id ) );
 		$this->assertTrue( $this->attachments->finish( $id, $token, AttachmentState::SKIPPED, $plan->skip_reason() ) );
 	}
+
+	public function test_a_reset_row_records_the_new_source_so_a_poison_file_stays_given_up() {
+		global $wpdb;
+
+		$id = $this->upload();
+		$this->planner->plan( $id );
+		$row = $this->variants->get_for_attachment( $id )[0];
+		$this->variants->transition( $row['id'], VariantStatus::PENDING, VariantStatus::DONE, array( 'source_file_size' => 1, 'quality' => 80 ) );
+
+		// The source file changed: the row goes back to pending and now knows the new size.
+		$this->assertTrue( $this->planner->plan( $id )->has_work() );
+		$reset = $this->variants->get_for_attachment( $id )[0];
+		$this->assertSame( VariantStatus::PENDING, $reset['status'] );
+		$this->assertGreaterThan( 1, $reset['source_file_size'] );
+
+		// The new file kills its workers three times.
+		$this->variants->transition( $reset['id'], VariantStatus::PENDING, VariantStatus::FAILED, array( 'reason' => 'max_attempts' ) );
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+		$this->attachments->set_state( $id, AttachmentState::FAILED, 'max_attempts' );
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET attempts = %d WHERE attachment_id = %d", AttachmentRepository::MAX_ATTEMPTS, $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		foreach ( $this->variants->get_for_attachment( $id ) as $other ) {
+			if ( VariantStatus::PENDING === $other['status'] ) {
+				$this->variants->transition( $other['id'], VariantStatus::PENDING, VariantStatus::FAILED, array( 'reason' => 'max_attempts', 'source_file_size' => $other['source_file_size'] ) );
+			}
+		}
+
+		$plan = $this->planner->plan( $id );
+
+		$this->assertFalse( $plan->has_work() );
+		$this->assertSame( AttachmentRepository::MAX_ATTEMPTS, $this->attachments->get_attempts( $id ), 'The attempts stay used up.' );
+	}
 }

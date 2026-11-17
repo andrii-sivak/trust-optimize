@@ -408,6 +408,7 @@ class AttachmentRepository {
 	 * Give up the claim on queued and processing attachments, remembering why (the queue was emptied).
 	 *
 	 * An attachment inside a publication (it holds the lease) is left alone: its worker is writing a served file.
+	 * Deactivation parks work, it does not kill it: the claim that was interrupted gives back its attempt.
 	 *
 	 * @param string $reason Reason stored with the state "none".
 	 * @return int Number of attachments suspended.
@@ -419,7 +420,8 @@ class AttachmentRepository {
 		if ( ! $this->database->has_schema( DatabaseManager::SCHEMA_RECOVERY ) ) {
 			return (int) $wpdb->query(
 				$wpdb->prepare(
-					"UPDATE {$this->table()} SET state = %s, reason = %s, updated_at = %s WHERE state IN (%s, %s)",
+					"UPDATE {$this->table()} SET attempts = CASE WHEN state = %s THEN GREATEST( attempts - 1, 0 ) ELSE attempts END, state = %s, reason = %s, updated_at = %s WHERE state IN (%s, %s)",
+					AttachmentState::PROCESSING,
 					AttachmentState::NONE,
 					$reason,
 					current_time( 'mysql', true ),
@@ -431,7 +433,8 @@ class AttachmentRepository {
 
 		return (int) $wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$this->table()} SET state = %s, reason = %s, updated_at = %s, attempt_source = NULL, attempt_token = NULL WHERE state IN (%s, %s) AND publishing_at IS NULL",
+				"UPDATE {$this->table()} SET attempts = CASE WHEN state = %s THEN GREATEST( attempts - 1, 0 ) ELSE attempts END, state = %s, reason = %s, updated_at = %s, attempt_source = NULL, attempt_token = NULL WHERE state IN (%s, %s) AND publishing_at IS NULL",
+				AttachmentState::PROCESSING,
 				AttachmentState::NONE,
 				$reason,
 				current_time( 'mysql', true ),

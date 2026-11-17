@@ -464,4 +464,40 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 			$this->commit();
 		}
 	}
+
+	public function test_a_deactivation_on_a_1_1_0_attachments_table_suspends_queued_and_processing_rows() {
+		global $wpdb;
+
+		$database = new DatabaseManager();
+		$tables   = $database->get_plugin_table_names();
+		$table    = $tables['attachments'];
+		$repo     = new TrustOptimize\Storage\AttachmentRepository( $database, new TrustOptimize\Storage\VariantRepository( $database ) );
+
+		try {
+			$this->downgrade_to_1_1_0( $tables );
+			foreach ( array( 9101 => 'queued', 9102 => 'processing' ) as $id => $state ) {
+				$wpdb->insert(
+					$table,
+					array(
+						'attachment_id' => $id,
+						'state'         => $state,
+						'attempts'      => 1,
+						'updated_at'    => '2026-11-01 10:00:00',
+					)
+				);
+			}
+
+			$this->assertSame( 2, $repo->suspend_unfinished( 'deactivated' ) );
+
+			foreach ( array( 9101, 9102 ) as $id ) {
+				$row = $wpdb->get_row( $wpdb->prepare( 'SELECT state, reason FROM %i WHERE attachment_id = %d', $table, $id ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+				$this->assertSame( array( 'none', 'deactivated' ), array( $row['state'], $row['reason'] ) );
+			}
+		} finally {
+			$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE attachment_id IN (9101, 9102)', $table ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			update_option( 'trust_optimize_db_version', '0.0.0' );
+			$database->check_version();
+			$this->commit();
+		}
+	}
 }

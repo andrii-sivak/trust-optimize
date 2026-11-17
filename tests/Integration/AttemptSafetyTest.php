@@ -479,4 +479,28 @@ class AttemptSafetyTest extends WP_UnitTestCase {
 		$this->assertSame( array( VariantStatus::FAILED, 'target_exists_foreign' ), array( $after['status'], $after['reason'] ) );
 		$this->assertSame( $hash, hash_file( 'sha256', $file ), 'The file at the target is unchanged.' );
 	}
+
+	public function test_a_worker_recovered_mid_run_ends_as_attempt_lost_and_schedules_nothing() {
+		$id = $this->upload();
+		$this->attachments->set_state( $id, AttachmentState::QUEUED );
+		$plugin    = Plugin::get_instance();
+		$processor = new AttachmentProcessor( $this->attachments, $this->variants, $this->converter, $plugin->planner, $plugin->cleanup, new TrustOptimize\Admin\Settings(), new CapabilityService(), new DatabaseManager() );
+		$queue     = new ConversionQueue( $this->attachments, $processor, $plugin->planner, new DatabaseManager() );
+		$this->writer->between = function () use ( $id ) {
+			$this->assertTrue( $this->attachments->recover_dead( $id, $this->attachments->get( $id )['attempt_token'] ) );
+		};
+
+		$result = $processor->run( $id, INF );
+
+		$this->assertSame( 'attempt_lost', $result->get_message() );
+		$this->assertFalse( $result->get_data()['more'] );
+
+		$this->writer->between = function () use ( $id ) {
+			$this->assertTrue( $this->attachments->recover_dead( $id, $this->attachments->get( $id )['attempt_token'] ) );
+		};
+		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+		$queue->process( $id );
+
+		$this->assertSame( array(), as_get_scheduled_actions( array( 'hook' => ConversionQueue::HOOK_PROCESS, 'status' => ActionScheduler_Store::STATUS_PENDING, 'args' => array( 'attachment_id' => $id ) ), 'ids' ) );
+	}
 }

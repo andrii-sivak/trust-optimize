@@ -132,6 +132,11 @@ class ImageConverter {
 
 		$editor->set_quality( $quality );
 
+		// A file at the target that is not what this row recorded is not ours: say so before spending the encoding on it.
+		if ( null !== $target_path && file_exists( $target_path ) && ! $this->writer->owns_target( $target_path, $owned_hash ) ) {
+			return $this->fail( $id, $token, 'target_exists_foreign', 'Target file exists and is not the TrustOptimize variant its row recorded.', $claimed, $source_size );
+		}
+
 		$saved = null === $target_path ? new \WP_Error( 'target_outside_uploads', 'Invalid target path.' ) : $this->writer->write_temporary( $editor, $target_path, $mime );
 
 		if ( is_wp_error( $saved ) ) {
@@ -157,12 +162,21 @@ class ImageConverter {
 			);
 			wp_delete_file( $saved['path'] );
 
-			// The row's previous file goes; a file that is not the row's stays where it is.
-			if ( $skipped && $this->writer->owns_target( $target_path, $owned_hash ) ) {
-				$this->discard_unowned_file( $target_path, $target_relative );
+			if ( ! $skipped || ! file_exists( $target_path ) || ! $this->writer->owns_target( $target_path, $owned_hash ) ) {
+				return OptimizeResult::skipped( $skipped ? 'not_smaller' : 'row_gone' );
 			}
 
-			return OptimizeResult::skipped( $skipped ? 'not_smaller' : 'row_gone' );
+			// The row's previous file may be served until now: it goes only inside a publication that holds the attempt.
+			$lease = $this->attachments->take_lease( $attachment_id, $token );
+
+			if ( true !== $lease ) {
+				return null === $lease ? OptimizeResult::skipped( 'not_smaller' ) : OptimizeResult::skipped( 'attempt_lost' );
+			}
+
+			$this->discard_unowned_file( $target_path, $target_relative );
+			$data = $this->attachments->release_lease( $attachment_id, $token ) ? array() : array( 'lease_kept' => true );
+
+			return OptimizeResult::skipped( 'not_smaller', $data );
 		}
 
 		$lease = $this->attachments->take_lease( $attachment_id, $token );

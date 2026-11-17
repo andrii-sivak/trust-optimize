@@ -125,6 +125,7 @@ class VariantPlanner {
 					'source_relative_path' => $row['source_relative_path'],
 					'width'                => $row['width'],
 					'height'               => $row['height'],
+					'source_file_size'     => $row['source_file_size'],
 					'reason'               => null,
 				)
 			);

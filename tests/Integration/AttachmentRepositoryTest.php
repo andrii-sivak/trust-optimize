@@ -407,4 +407,18 @@ class AttachmentRepositoryTest extends WP_UnitTestCase {
 
 		$this->assertSame( 255, mb_strlen( $this->attachments->get( 710 )['last_error'], 'UTF-8' ) );
 	}
+
+	public function test_a_deactivation_gives_back_the_attempt_of_an_interrupted_claim() {
+		$this->attachments->claim( 736, AttachmentRepository::SOURCE_QUEUE );
+		$this->attachments->recover_dead( 736, $this->attachments->get( 736 )['attempt_token'] );
+		$this->attachments->claim( 736, AttachmentRepository::SOURCE_QUEUE );
+		$this->attachments->claim( 737, AttachmentRepository::SOURCE_QUEUE );
+		$this->attachments->recover_dead( 737, $this->attachments->get( 737 )['attempt_token'] );
+		$this->assertSame( 2, $this->attachments->get_attempts( 736 ) );
+
+		$this->attachments->suspend_unfinished( 'deactivated' );
+
+		$this->assertSame( 1, $this->attachments->get_attempts( 736 ), 'The interrupted claim is not a death.' );
+		$this->assertSame( 1, $this->attachments->get_attempts( 737 ), 'A queued row keeps what it had.' );
+	}
 }
