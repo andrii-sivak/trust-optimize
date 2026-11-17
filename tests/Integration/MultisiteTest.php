@@ -181,6 +181,70 @@ class MultisiteTest extends WP_UnitTestCase {
 		restore_current_blog();
 	}
 
+	/**
+	 * Give the jobs table of the current site its 1.0.0 shape and version.
+	 */
+	private function downgrade_jobs_table() {
+		global $wpdb;
+
+		$jobs = ( new DatabaseManager() )->get_plugin_table_names()['jobs'];
+
+		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		$wpdb->query( "ALTER TABLE `{$jobs}` DROP COLUMN pause_reason" );
+		$wpdb->query(
+			"ALTER TABLE `{$jobs}` ADD COLUMN processed int unsigned NOT NULL DEFAULT 0, ADD COLUMN skipped int unsigned NOT NULL DEFAULT 0,
+			ADD COLUMN failed_count int unsigned NOT NULL DEFAULT 0, ADD COLUMN created_count int unsigned NOT NULL DEFAULT 0,
+			ADD COLUMN deleted_count int unsigned NOT NULL DEFAULT 0, ADD COLUMN profile_hash varchar(64) NOT NULL DEFAULT ''"
+		);
+		// phpcs:enable
+		update_option( 'trust_optimize_db_version', '1.0.0' );
+	}
+
+	/**
+	 * Column names of the jobs table of the current site.
+	 *
+	 * @return string[]
+	 */
+	private function jobs_columns() {
+		global $wpdb;
+
+		$jobs = ( new DatabaseManager() )->get_plugin_table_names()['jobs'];
+
+		return $wpdb->get_col( "SHOW COLUMNS FROM `{$jobs}`" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+	}
+
+	public function test_a_1_0_0_subsite_is_migrated_on_its_own_first_request_only() {
+		list( $site_two, $site_three ) = $this->blog_ids;
+
+		foreach ( $this->blog_ids as $blog_id ) {
+			$this->prepare_site( $blog_id );
+			switch_to_blog( $blog_id );
+			$this->assertSame( '1.1.0', get_option( 'trust_optimize_db_version' ) );
+			$this->downgrade_jobs_table();
+			restore_current_blog();
+		}
+
+		switch_to_blog( $site_two );
+		$this->first_request();
+		$migrated = $this->jobs_columns();
+		$version  = get_option( 'trust_optimize_db_version' );
+		restore_current_blog();
+
+		$this->assertSame( '1.1.0', $version );
+		$this->assertContains( 'pause_reason', $migrated );
+		$this->assertNotContains( 'profile_hash', $migrated );
+		$this->assertNotContains( 'processed', $migrated );
+
+		switch_to_blog( $site_three );
+		$untouched = $this->jobs_columns();
+		$version   = get_option( 'trust_optimize_db_version' );
+		restore_current_blog();
+
+		$this->assertSame( '1.0.0', $version, 'Another site is not migrated by the request of this one.' );
+		$this->assertContains( 'profile_hash', $untouched );
+		$this->assertNotContains( 'pause_reason', $untouched );
+	}
+
 	public function test_settings_are_per_site() {
 		list( $site_two ) = $this->blog_ids;
 		update_option( 'trust_optimize_options', array( 'webp_quality' => 50 ) );

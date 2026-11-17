@@ -235,4 +235,53 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 			$this->commit();
 		}
 	}
+
+	public function test_a_drop_that_loses_the_race_fails_this_run_and_the_next_one_completes() {
+		global $wpdb;
+
+		$database = new DatabaseManager();
+		$jobs     = $database->get_plugin_table_names()['jobs'];
+		$raced    = false;
+		$other    = function ( $query ) use ( &$raced, $jobs ) {
+			global $wpdb;
+
+			if ( ! $raced && 0 === stripos( ltrim( $query ), 'ALTER TABLE' ) && false !== stripos( $query, 'DROP COLUMN' ) ) {
+				$raced = true;
+				// The other request drops the same column first.
+				$wpdb->query( preg_replace( '/^\s*ALTER TABLE\s+\S+/i', "ALTER TABLE `{$jobs}`", $query ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery
+			}
+
+			return $query;
+		};
+
+		try {
+			$ids = $this->downgrade_jobs( $jobs );
+
+			add_filter( 'query', $other );
+			$wpdb->suppress_errors( true );
+			$database->check_version();
+			$wpdb->suppress_errors( false );
+			remove_filter( 'query', $other );
+
+			$this->assertTrue( $raced, 'The other request got in.' );
+			$this->assertSame( '1.0.0', get_option( 'trust_optimize_db_version' ), 'The failed drop leaves the version.' );
+
+			$database->check_version();
+
+			$this->assertSame( '1.1.0', get_option( 'trust_optimize_db_version' ) );
+			$this->assertSame( 'varchar(32)', $this->column_type( $jobs, 'pause_reason' ) );
+			foreach ( array( 'processed', 'skipped', 'failed_count', 'created_count', 'deleted_count', 'profile_hash' ) as $column ) {
+				$this->assertNull( $this->column_type( $jobs, $column ), $column );
+			}
+			$this->assertSame( 'user', $this->job_row( $jobs, $ids['user'] )['pause_reason'] );
+		} finally {
+			remove_filter( 'query', $other );
+			$wpdb->suppress_errors( false );
+			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+			$wpdb->query( "DELETE FROM `{$jobs}`" );
+			update_option( 'trust_optimize_db_version', '0.0.0' );
+			$database->check_version();
+			$this->commit();
+		}
+	}
 }

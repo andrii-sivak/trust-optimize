@@ -216,4 +216,21 @@ class BulkJobRepositoryTest extends WP_UnitTestCase {
 			update_option( 'trust_optimize_db_version', DatabaseManager::DB_VERSION );
 		}
 	}
+
+	public function test_stale_recovery_leaves_an_existing_last_error_untouched() {
+		global $wpdb;
+
+		$id = $this->jobs->create( 'library' )->get_id();
+		$this->jobs->mark_running( $id );
+		$error = "earlier failure\nsecond line";
+		$wpdb->update( $wpdb->prefix . 'trust_optimize_jobs', array( 'last_error' => $error ), array( 'id' => $id ) );
+		$this->age( $id, 16 * MINUTE_IN_SECONDS );
+
+		$this->assertSame( 1, $this->jobs->recover_stale_running() );
+
+		$row = $this->row( $id );
+		$this->assertSame( JobStatus::PAUSED, $row['status'] );
+		$this->assertSame( 'stopped', $row['pause_reason'] );
+		$this->assertSame( $error, $row['last_error'] );
+	}
 }
