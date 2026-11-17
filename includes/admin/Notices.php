@@ -222,7 +222,7 @@ class Notices {
 		$job = $this->jobs->get_active_job();
 		$job = $job ? $job->to_array() : null;
 
-		if ( $job && JobStatus::PAUSED === $job['status'] && PauseReason::LOW_DISK_SPACE === ( $job['pause_reason'] ?? null ) ) {
+		if ( $job && JobStatus::PAUSED === $job['status'] && PauseReason::LOW_DISK_SPACE === ( $job['pause_reason'] ?? $job['last_error'] ?? null ) ) {
 			return $job;
 		}
 

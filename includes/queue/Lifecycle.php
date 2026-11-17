@@ -29,7 +29,7 @@ class Lifecycle {
 	const HOOK_RESTORE = 'trust_optimize_restore_queue';
 
 	/**
-	 * Reason stored on suspended attachments and paused jobs.
+	 * Reason stored on suspended attachments.
 	 */
 	const REASON = 'deactivated';
 

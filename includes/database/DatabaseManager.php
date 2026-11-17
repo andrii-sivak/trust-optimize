@@ -87,6 +87,11 @@ class DatabaseManager {
 				'UPDATE %i SET pause_reason = %s WHERE status = %s AND pause_reason IS NULL',
 				array( $jobs, PauseReason::UNKNOWN, $paused ),
 			),
+			// A column that survived a failed run can hold a reason on a job that has moved on since.
+			array(
+				'UPDATE %i SET pause_reason = NULL WHERE status <> %s AND pause_reason IS NOT NULL',
+				array( $jobs, $paused ),
+			),
 			// The codes are not errors in any other status either.
 			array(
 				'UPDATE %i SET last_error = NULL WHERE status <> %s AND last_error IN (%s, %s)',

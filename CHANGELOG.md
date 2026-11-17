@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Documentation link on the settings page, the plugin and author URIs and the link in `readme.txt` point to the renamed GitHub account; the old author profile link returned 404.
 
 ### Changed
-- Database schema 1.1.0: the jobs table gets `pause_reason`, and the unused columns `processed`, `skipped`, `failed_count`, `created_count`, `deleted_count` and `profile_hash` are dropped. Progress fields are unchanged in the admin, REST and WP-CLI; the job no longer has `profile_hash`. Reasons that were stored in `last_error` (`deactivated`, `low_disk_space`) move to `pause_reason`. Replacing the plugin with an older version after this update is not supported; roll back with a consistent backup of files and database.
+- Database schema 1.1.0: the jobs table gets `pause_reason`, and the unused columns `processed`, `skipped`, `failed_count`, `created_count`, `deleted_count` and `profile_hash` are dropped. Progress fields are unchanged in the admin, REST and WP-CLI; the job no longer has `profile_hash`. Reasons that were stored in `last_error` (`deactivated`, `low_disk_space`) move to `pause_reason`, and stale recovery sets `pause_reason` `stopped` instead of adding its "recovered from stale running state" message to `last_error`. Replacing the plugin with an older version after this update is not supported; roll back with a consistent backup of files and database.
 - Requires WordPress 7.0 or higher (was 6.5).
 - Bulk job timestamps (`started_at`, `updated_at`, `finished_at`) in the REST API and WP-CLI are now UTC, in the same `Y-m-d H:i:s` format. Values written before the update are not converted.
 
