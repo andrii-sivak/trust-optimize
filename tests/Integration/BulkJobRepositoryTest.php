@@ -196,27 +196,6 @@ class BulkJobRepositoryTest extends WP_UnitTestCase {
 		}
 	}
 
-	public function test_pauses_land_in_the_old_shape_while_the_migration_is_unfinished() {
-		$id = $this->jobs->create( 'library' )->get_id();
-		$this->jobs->mark_running( $id );
-		update_option( 'trust_optimize_db_version', '1.0.0' );
-
-		try {
-			$this->assertTrue( $this->jobs->pause( $id, 'low_disk_space' ) );
-			$row = $this->row( $id );
-			$this->assertSame( JobStatus::PAUSED, $row['status'] );
-			$this->assertSame( 'low_disk_space', $row['last_error'] );
-			$this->assertNull( $row['pause_reason'] );
-
-			$this->assertTrue( $this->jobs->mark_running( $id ), 'Resume works on the old schema.' );
-			$this->assertSame( 1, $this->jobs->pause_unfinished( 'deactivated' ) );
-			$this->assertSame( 'deactivated', $this->row( $id )['last_error'] );
-			$this->assertTrue( $this->jobs->cancel( $id ) );
-		} finally {
-			update_option( 'trust_optimize_db_version', DatabaseManager::DB_VERSION );
-		}
-	}
-
 	public function test_stale_recovery_leaves_an_existing_last_error_untouched() {
 		global $wpdb;
 

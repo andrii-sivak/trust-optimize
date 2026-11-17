@@ -5,6 +5,7 @@
  * @package TrustOptimize\Tests
  */
 
+use TrustOptimize\Bulk\BulkJobRepository;
 use TrustOptimize\Database\DatabaseManager;
 
 /**
@@ -266,6 +267,10 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 			$this->assertTrue( $raced, 'The other request got in.' );
 			$this->assertSame( '1.0.0', get_option( 'trust_optimize_db_version' ), 'The failed drop leaves the version.' );
 
+			// The column exists and is filled; the job moves on before the next run.
+			$this->assertSame( 'user', $this->job_row( $jobs, $ids['user'] )['pause_reason'] );
+			$wpdb->update( $jobs, array( 'status' => 'running' ), array( 'id' => $ids['user'] ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+
 			$database->check_version();
 
 			$this->assertSame( '1.1.0', get_option( 'trust_optimize_db_version' ) );
@@ -273,10 +278,90 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 			foreach ( array( 'processed', 'skipped', 'failed_count', 'created_count', 'deleted_count', 'profile_hash' ) as $column ) {
 				$this->assertNull( $this->column_type( $jobs, $column ), $column );
 			}
-			$this->assertSame( 'user', $this->job_row( $jobs, $ids['user'] )['pause_reason'] );
+			$this->assertNull( $this->job_row( $jobs, $ids['user'] )['pause_reason'], 'A job that left the pause does not keep a reason.' );
 		} finally {
 			remove_filter( 'query', $other );
 			$wpdb->suppress_errors( false );
+			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+			$wpdb->query( "DELETE FROM `{$jobs}`" );
+			update_option( 'trust_optimize_db_version', '0.0.0' );
+			$database->check_version();
+			$this->commit();
+		}
+	}
+
+	public function test_pauses_written_on_a_1_0_0_table_land_and_the_migration_maps_them() {
+		global $wpdb;
+
+		$database = new DatabaseManager();
+		$jobs     = $database->get_plugin_table_names()['jobs'];
+		$repo     = new BulkJobRepository( $database );
+		$sentence = 'Bulk job recovered from stale running state after 900 seconds of inactivity. Resume is required.';
+
+		$insert = static function ( $status, $last_error = null, $updated_at = '2026-11-10 10:00:00' ) use ( $wpdb, $jobs ) {
+			$wpdb->insert(
+				$jobs,
+				array(
+					'type'       => 'sync',
+					'status'     => $status,
+					'last_error' => $last_error,
+					'updated_at' => $updated_at,
+				)
+			);
+
+			return (int) $wpdb->insert_id;
+		};
+		$old_row = function ( $id ) use ( $wpdb, $jobs ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			return $wpdb->get_row( $wpdb->prepare( 'SELECT status, last_error FROM %i WHERE id = %d', $jobs, $id ), ARRAY_A );
+		};
+
+		try {
+			$this->downgrade_jobs( $jobs );
+			$this->assertFalse( $database->is_current() );
+
+			$stale = $insert( 'running', 'earlier failure', gmdate( 'Y-m-d H:i:s', time() - HOUR_IN_SECONDS ) );
+			$this->assertSame( 1, $repo->recover_stale_running( 900 ) );
+			$this->assertSame( array( 'paused', "earlier failure\n" . $sentence ), array_values( $old_row( $stale ) ) );
+
+			$deactivated = $insert( 'running' );
+			$this->assertSame( 1, $repo->pause_unfinished( 'deactivated' ) );
+			$this->assertSame( array( 'paused', 'deactivated' ), array_values( $old_row( $deactivated ) ) );
+
+			$disk = $insert( 'running' );
+			$this->assertTrue( $repo->pause( $disk, 'low_disk_space' ) );
+			$this->assertSame( array( 'paused', 'low_disk_space' ), array_values( $old_row( $disk ) ) );
+
+			$user = $insert( 'running' );
+			$this->assertTrue( $repo->pause( $user ) );
+			$this->assertSame( array( 'paused', null ), array_values( $old_row( $user ) ) );
+
+			$resumed = $insert( 'running' );
+			$this->assertTrue( $repo->pause( $resumed ) );
+			$this->assertTrue( $repo->mark_running( $resumed ) );
+			$this->assertSame( 'running', $old_row( $resumed )['status'] );
+
+			$cancelled = $insert( 'running' );
+			$this->assertTrue( $repo->pause( $cancelled, 'low_disk_space' ) );
+			$this->assertTrue( $repo->cancel( $cancelled ) );
+			$this->assertSame( 'cancelled', $old_row( $cancelled )['status'] );
+
+			$database->check_version();
+
+			$this->assertSame( '1.1.0', get_option( 'trust_optimize_db_version' ) );
+			$expected = array(
+				'stale'       => array( $stale, 'unknown', "earlier failure\n" . $sentence ),
+				'deactivated' => array( $deactivated, 'deactivated', null ),
+				'disk'        => array( $disk, 'low_disk_space', null ),
+				'user'        => array( $user, 'user', null ),
+				'resumed'     => array( $resumed, null, null ),
+				'cancelled'   => array( $cancelled, null, null ),
+			);
+			foreach ( $expected as $label => $values ) {
+				$row = $this->job_row( $jobs, $values[0] );
+				$this->assertSame( array( $values[1], $values[2] ), array( $row['pause_reason'], $row['last_error'] ), $label );
+			}
+		} finally {
 			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
 			$wpdb->query( "DELETE FROM `{$jobs}`" );
 			update_option( 'trust_optimize_db_version', '0.0.0' );
