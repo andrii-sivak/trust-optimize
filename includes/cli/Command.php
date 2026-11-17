@@ -188,7 +188,8 @@ class Command {
 			return;
 		}
 
-		$data = $this->progress->describe( $job );
+		$data                  = $this->progress->describe( $job );
+		$data['queue_signals'] = implode( ',', $this->health->queue_signals() );
 
 		\WP_CLI\Utils\format_items( 'table', array( $data ), array_keys( $data ) );
 	}
@@ -257,6 +258,10 @@ class Command {
 
 		$this->stop_if_schema_pending( $result );
 
+		if ( $result->is_skipped() && AttachmentProcessor::BUSY === $result->get_message() ) {
+			\WP_CLI::error( $this->busy_message( $result ) );
+		}
+
 		\WP_CLI::line( wp_json_encode( $result->to_array() ) );
 	}
 
@@ -277,6 +282,20 @@ class Command {
 		$result = $this->cleanup->cleanup_attachment( $attachment_id );
 
 		\WP_CLI::line( wp_json_encode( $result->to_array() ) );
+	}
+
+	/**
+	 * What a sync answers when a worker holds the attachment.
+	 *
+	 * @param OptimizeResult $result Skipped result of AttachmentProcessor::sync() with the message "busy".
+	 * @return string
+	 */
+	private function busy_message( OptimizeResult $result ) {
+		return sprintf(
+			'A conversion of this attachment is running (source: %s, since %s UTC).',
+			(string) ( $result->get_data()['source'] ?? 'legacy' ),
+			(string) ( $result->get_data()['since'] ?? '' )
+		);
 	}
 
 	/**
@@ -472,6 +491,11 @@ class Command {
 					++$failed;
 				}
 
+				if ( $result->is_skipped() && AttachmentProcessor::BUSY === $result->get_message() ) {
+					\WP_CLI::warning( sprintf( 'Attachment %d: %s', $attachment_id, $this->busy_message( $result ) ) );
+					++$failed;
+				}
+
 				$bar->tick();
 
 				// Long runs would otherwise keep every post and meta row they touched.
@@ -527,11 +551,21 @@ class Command {
 
 		$message = sprintf( 'Job #%d %s requested.', $job->get_id(), $action );
 
-		if ( in_array( $action, array( 'pause', 'cancel' ), true ) ) {
+		if ( 'pause' === $action ) {
+			$message .= sprintf( ' Attachments already queued (up to %d) are parked until Resume.', BulkProducer::max_pending() );
+		}
+
+		if ( 'cancel' === $action ) {
 			$message .= sprintf( ' Attachments already queued (up to %d) will still be processed.', BulkProducer::max_pending() );
 		}
 
 		\WP_CLI::success( $message );
+
+		$signals = 'resume' === $action ? $this->health->queue_signals() : array();
+
+		if ( $signals ) {
+			\WP_CLI::warning( sprintf( 'The queue looks stuck (%s): check that WP-Cron or a system cron runs Action Scheduler.', implode( ', ', $signals ) ) );
+		}
 	}
 
 	/**

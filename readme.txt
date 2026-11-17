@@ -69,6 +69,16 @@ Conversion runs in Action Scheduler tasks that are started by WP-Cron, which nee
 
 `* * * * * cd /path/to/site && wp action-scheduler run --quiet`
 
+If neither WP-Cron nor a system cron runs the queue, a worker that died leaves its task claimed and nothing else is converted. The Bulk optimization tab and the admin notices then show that the queue looks stuck (no task has finished for 15 minutes, or a task has been running for that long). Start the queue as above, then resume the paused job: a job that was resumed while the queue is stuck stays running and continues by itself once the queue runs again.
+
+= An admin notice says an attachment is held by a conversion =
+
+A conversion that was started from WP-CLI or REST, one that started before an update of the plugin, or a publication that could not finish its last write is never ended automatically: the age of its record does not prove that its process has ended. The notice names the attachment and since when it is held. Make sure that process has ended or stop it, then run:
+
+`wp trust-optimize release <id>`
+
+The command first shows the attempt and the command that confirms it; run that command to free the attachment. It never deletes or overwrites a file. A file at a variant path that may already be the new version is kept, is not served while its record is not done, and the next conversion reports it as `target_exists_foreign`.
+
 = How do I use it on a multisite network? =
 
 Activate the plugin for the network. Every site has its own settings, its own database tables (`{prefix}trust_optimize_*`), its own queue and its own uploads folder (`uploads/sites/N`). A site creates its tables on its first request after activation.
@@ -123,7 +133,8 @@ Sites without the setting "Remove data on uninstall" are left untouched. If `tru
 
 * `wp trust-optimize inventory` – counts per type, state and variant status.
 * `wp trust-optimize sync [--yes] [--wait] [--now] [--batch-size=<n>]` – convert the library.
-* `wp trust-optimize status | pause | resume | cancel` – show and control the bulk job.
+* `wp trust-optimize status | pause | resume | cancel` – show and control the bulk job. Pause parks the attachments that are already queued until Resume; `resume` warns while the queue looks stuck.
+* `wp trust-optimize release <id> [--attempt=<token|legacy> --since=<datetime> --lease=<datetime|none>]` – free an attachment held by a conversion that nothing else will end (see the FAQ). Without options it only shows the attempt.
 * `wp trust-optimize remove --all --yes [--wait]` – delete all variants.
 * `wp trust-optimize sync-attachment <id>` and `remove-attachment <id>` – one image.
 
@@ -135,7 +146,9 @@ All routes are under `/wp-json/trust-optimize/v1/`. The status route needs the c
 * `GET /status`, `POST /bulk/inventory`, `POST /bulk/start`, `GET /bulk/status`, `POST /bulk/{pause|resume|cancel}` – library status and bulk jobs.
 * `POST /image/{id}/sync`, `POST /image/{id}/remove` – one attachment.
 
-The bulk job object of the REST API and of `wp trust-optimize status` includes `pause_reason` (`user`, `deactivated`, `low_disk_space`, `stopped`, `unknown`; null unless the job is paused) and no longer includes `profile_hash`.
+The bulk job object of the REST API and of `wp trust-optimize status` includes `pause_reason` (`user`, `deactivated`, `low_disk_space`, `stopped`, `unknown`; null unless the job is paused), `queue_signals` (a list of `stuck_claim` and `no_progress` while a job is active; diagnostics only) and no longer includes `profile_hash`.
+
+Errors of the REST API: `trust_optimize_schema_pending` (503: the database update has not finished; syncs, bulk start and resume wait for it), `trust_optimize_attachment_busy` (409: a conversion holds the attachment; the data carries `source` and `since`), `trust_optimize_disk_low` (409: resume refused on a full disk), `trust_optimize_resume_failed` and `trust_optimize_start_failed` (500: Action Scheduler did not accept the job's task; a failed start fails the job and frees the library).
 
 = Hooks =
 
@@ -151,7 +164,7 @@ Filters:
 * `trust_optimize_bulk_batch_size` ( int ) – attachments queued per producer run (default 25).
 * `trust_optimize_bulk_max_pending` ( int ) – pending tasks the bulk job keeps queued (default 200).
 * `trust_optimize_bulk_time_budget` ( int $seconds ) – time of one producer run (default 20).
-* `trust_optimize_bulk_stale_after_seconds` ( int ) – a running job without progress is considered stale after this time (default 900).
+* `trust_optimize_bulk_stale_after_seconds` ( int ) – a running job without progress is considered stale after this time (default 900). A job that was resumed while the queue is stuck is not stopped again for the same stoppage.
 * `trust_optimize_uninstall_cleanup_batch_size` ( int ) – attachments cleaned per step on uninstall (default 100).
 * `trust_optimize_uninstall_cleanup_max_records` ( int ) – attachments cleaned per site in one uninstall request (default 5000).
 * `trust_optimize_uninstall_cleanup_max_seconds` ( float ) – time one uninstall request spends per site (default 20).

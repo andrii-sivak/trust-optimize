@@ -156,7 +156,7 @@ class Plugin {
 		$statistics             = new Statistics( $this->inventory, $variants );
 		$health                 = new SiteHealth( $capabilities );
 		$this->admin            = new Admin( $settings, $attachments, $eligibility, $capabilities, $variants, $statistics, $health );
-		$this->rest_controller  = new RestController( $attachments, $this->processor, $this->cleanup, $jobs, $progress, $this->bulk_producer );
+		$this->rest_controller  = new RestController( $attachments, $this->processor, $this->cleanup, $jobs, $progress, $this->bulk_producer, $this->job_health );
 
 		foreach ( array(
 			$database,
@@ -173,7 +173,7 @@ class Plugin {
 			$this->job_health,
 			$statistics,
 			$this->admin,
-			new Notices( $jobs, $this->bulk_producer, $capabilities, $database ),
+			new Notices( $jobs, $this->bulk_producer, $capabilities, $database, $this->job_health ),
 			$this->rest_controller,
 		) as $component ) {
 			$component->register();

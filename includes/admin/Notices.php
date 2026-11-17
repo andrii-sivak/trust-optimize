@@ -9,6 +9,7 @@ namespace TrustOptimize\Admin;
 
 use TrustOptimize\Bulk\BulkJobRepository;
 use TrustOptimize\Bulk\BulkProducer;
+use TrustOptimize\Bulk\JobHealth;
 use TrustOptimize\Capabilities\CapabilityService;
 use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Domain\JobStatus;
@@ -19,8 +20,9 @@ use TrustOptimize\Domain\PauseReason;
  *
  * Shown to users who can manage options only. A notice can be hidden for the current user; the
  * hidden keys are kept in user meta, and a key changes when the event it describes changes, so a
- * new event shows again. The notice about a bulk job paused for lack of disk space cannot be
- * hidden: it has the button that resumes the job.
+ * new event shows again. The notices that need an action cannot be hidden: the ones about a paused
+ * bulk job have the button that resumes it, and those about the queue and about attachments held by
+ * a conversion that nothing will end say what to do.
  */
 class Notices {
 
@@ -38,6 +40,11 @@ class Notices {
 	 * Action of the resume button.
 	 */
 	const ACTION_RESUME = 'trust_optimize_resume_bulk';
+
+	/**
+	 * Transient (per user) that carries the error of a Resume to the next page.
+	 */
+	const RESUME_ERROR = 'trust_optimize_resume_error_';
 
 	/**
 	 * Bulk job repository.
@@ -68,18 +75,27 @@ class Notices {
 	private $database;
 
 	/**
+	 * Job health.
+	 *
+	 * @var JobHealth
+	 */
+	private $health;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param BulkJobRepository $jobs         Bulk job repository.
 	 * @param BulkProducer      $producer     Bulk producer.
 	 * @param CapabilityService $capabilities Capability service.
 	 * @param DatabaseManager   $database     Database manager.
+	 * @param JobHealth         $health       Job health.
 	 */
-	public function __construct( BulkJobRepository $jobs, BulkProducer $producer, CapabilityService $capabilities, DatabaseManager $database ) {
+	public function __construct( BulkJobRepository $jobs, BulkProducer $producer, CapabilityService $capabilities, DatabaseManager $database, JobHealth $health ) {
 		$this->jobs         = $jobs;
 		$this->producer     = $producer;
 		$this->capabilities = $capabilities;
 		$this->database     = $database;
+		$this->health       = $health;
 	}
 
 	/**
@@ -116,6 +132,10 @@ class Notices {
 					wp_nonce_field( self::ACTION_RESUME, '_wpnonce', true, false ),
 					esc_html__( 'Resume', 'trust-optimize' )
 				);
+			}
+
+			if ( ! empty( $notice['bulk_link'] ) ) {
+				$actions .= sprintf( ' <a href="%s">%s</a>', esc_url( admin_url( 'admin.php?page=trust-optimize#bulk' ) ), esc_html__( 'Bulk Optimization', 'trust-optimize' ) );
 			}
 
 			if ( ! empty( $notice['dismissible'] ) ) {
@@ -166,7 +186,9 @@ class Notices {
 	}
 
 	/**
-	 * Continue the bulk job that was paused because the disk is nearly full.
+	 * Continue the paused bulk job.
+	 *
+	 * An error is kept for the next page, where it is shown next to the button that caused it.
 	 */
 	public function handle_resume() {
 		check_admin_referer( self::ACTION_RESUME );
@@ -175,10 +197,14 @@ class Notices {
 			wp_die( esc_html__( 'You are not allowed to do this.', 'trust-optimize' ), '', array( 'response' => 403 ) );
 		}
 
-		$job = $this->paused_for_disk();
+		$job = $this->paused_job();
 
 		if ( $job ) {
-			$this->producer->resume( $job['id'] );
+			$outcome = $this->producer->resume( $job['id'] );
+
+			if ( is_wp_error( $outcome ) ) {
+				set_transient( self::RESUME_ERROR . get_current_user_id(), $outcome->get_error_message(), MINUTE_IN_SECONDS );
+			}
 		}
 
 		wp_safe_redirect( wp_get_referer() ? wp_get_referer() : admin_url( 'admin.php?page=trust-optimize' ) );
@@ -188,7 +214,10 @@ class Notices {
 	/**
 	 * The notices that apply now.
 	 *
-	 * @return array[] Each with key, type, message (limited HTML) and optionally dismissible and resume.
+	 * What blocks conversion comes first (the unfinished update, the queue, attachments only an operator can free),
+	 * then the paused job with the button that resumes it.
+	 *
+	 * @return array[] Each with key, type, message (limited HTML) and optionally dismissible, resume and bulk_link.
 	 */
 	private function collect() {
 		$notices = array();
@@ -201,14 +230,30 @@ class Notices {
 			);
 		}
 
-		$paused = $this->paused_for_disk();
+		$signals = $this->health->queue_signals();
+
+		if ( $signals ) {
+			$notices[] = $this->queue_notice( $signals );
+		}
+
+		foreach ( $this->health->held() as $attempt ) {
+			$notices[] = $this->held_notice( $attempt );
+		}
+
+		$paused = $this->paused_job();
 
 		if ( $paused ) {
+			$notices[] = $this->paused_notice( $paused );
+		}
+
+		$error = get_transient( self::RESUME_ERROR . get_current_user_id() );
+
+		if ( false !== $error ) {
+			delete_transient( self::RESUME_ERROR . get_current_user_id() );
 			$notices[] = array(
-				'key'     => 'disk:' . $paused['id'],
-				'type'    => 'warning',
-				'resume'  => true,
-				'message' => esc_html__( 'The bulk job is paused because the disk is almost full. Free some space, then resume the job.', 'trust-optimize' ),
+				'key'     => 'resume-error',
+				'type'    => 'error',
+				'message' => esc_html( (string) $error ),
 			);
 		}
 
@@ -232,18 +277,164 @@ class Notices {
 	}
 
 	/**
-	 * The active bulk job if it is paused for lack of disk space.
+	 * The active bulk job when it is paused for another reason than the user's own Pause.
 	 *
 	 * @return array|null
 	 */
-	private function paused_for_disk() {
+	private function paused_job() {
 		$job = $this->jobs->get_active_job();
 		$job = $job ? $job->to_array() : null;
 
-		if ( $job && JobStatus::PAUSED === $job['status'] && PauseReason::LOW_DISK_SPACE === ( $job['pause_reason'] ?? $job['last_error'] ?? null ) ) {
+		if ( $job && JobStatus::PAUSED === $job['status'] && PauseReason::USER !== $this->reason_of( $job ) ) {
 			return $job;
 		}
 
 		return null;
+	}
+
+	/**
+	 * Why a paused job is paused.
+	 *
+	 * Before the migration to 1.1.0 the reason is the last error, and a pause without one is the user's.
+	 *
+	 * @param array $job Job row.
+	 * @return string
+	 */
+	private function reason_of( array $job ) {
+		if ( ! empty( $job['pause_reason'] ) ) {
+			return (string) $job['pause_reason'];
+		}
+
+		return empty( $job['last_error'] ) ? PauseReason::USER : (string) $job['last_error'];
+	}
+
+	/**
+	 * The notice of a paused job: why it is paused, the error behind that, and the button.
+	 *
+	 * @param array $job Job row.
+	 * @return array
+	 */
+	private function paused_notice( array $job ) {
+		$reason = $this->reason_of( $job );
+
+		if ( PauseReason::LOW_DISK_SPACE === $reason ) {
+			return array(
+				'key'     => 'disk:' . $job['id'],
+				'type'    => 'warning',
+				'resume'  => true,
+				'message' => esc_html__( 'The bulk job is paused because the disk is almost full. Free some space, then resume the job.', 'trust-optimize' ),
+			);
+		}
+
+		$labels = array(
+			PauseReason::DEACTIVATED => __( 'the plugin was deactivated', 'trust-optimize' ),
+			PauseReason::STOPPED     => __( 'the job stopped responding', 'trust-optimize' ),
+		);
+		$label  = $labels[ $reason ] ?? __( 'the reason is unknown', 'trust-optimize' );
+		$error  = (string) ( $job['last_error'] ?? '' );
+
+		return array(
+			'key'       => 'paused:' . $job['id'],
+			'type'      => 'warning',
+			'resume'    => true,
+			'bulk_link' => true,
+			'message'   => esc_html(
+				sprintf(
+					/* translators: 1: why the bulk job is paused, 2: the last error of the job or a sentence saying that the cause is unknown. */
+					__( 'The bulk job is paused: %1$s. %2$s', 'trust-optimize' ),
+					$label,
+					'' !== $error && PauseReason::UNKNOWN !== $reason
+						? sprintf(
+							/* translators: %s: the last error of the job. */
+							__( 'Last error: %s.', 'trust-optimize' ),
+							$error
+						)
+						: __( 'The cause is not known.', 'trust-optimize' )
+				)
+			),
+		);
+	}
+
+	/**
+	 * The warning about a queue that does not run.
+	 *
+	 * @param string[] $signals JobHealth signals.
+	 * @return array
+	 */
+	private function queue_notice( array $signals ) {
+		$parts = array();
+
+		if ( in_array( JobHealth::SIGNAL_STUCK_CLAIM, $signals, true ) ) {
+			$parts[] = __( 'A queued task has been running or claimed for more than 15 minutes, so its worker may have died.', 'trust-optimize' );
+		}
+
+		if ( in_array( JobHealth::SIGNAL_NO_PROGRESS, $signals, true ) ) {
+			$parts[] = __( 'Tasks are due, but none has finished in the last 15 minutes.', 'trust-optimize' );
+		}
+
+		return array(
+			'key'       => 'queue-signals',
+			'type'      => 'warning',
+			'bulk_link' => true,
+			'message'   => esc_html( implode( ' ', $parts ) . ' ' . __( 'Action Scheduler may not be running: check that WP-Cron or a system cron runs it.', 'trust-optimize' ) ),
+		);
+	}
+
+	/**
+	 * The notice of an attachment that a conversion holds and nothing else will free: instructions, no button.
+	 *
+	 * @param array $attempt Attempt as described by JobHealth::held().
+	 * @return array
+	 */
+	private function held_notice( array $attempt ) {
+		$id    = (int) $attempt['attachment_id'];
+		$since = get_date_from_gmt( $attempt['since'], get_option( 'date_format' ) . ' ' . get_option( 'time_format' ) );
+
+		switch ( $attempt['kind'] ) {
+			case 'publication_incomplete':
+				$what = sprintf(
+					/* translators: 1: attachment ID, 2: date and time, 3: file path. */
+					__( 'The publication of the optimized files of attachment %1$d did not finish (since %2$s). The file at %3$s may already be the new version while its record keeps the previous hash. It is not served while its record is not "done", and it will be kept and reported as target_exists_foreign.', 'trust-optimize' ),
+					$id,
+					$since,
+					implode( ', ', $attempt['paths'] )
+				);
+				break;
+			case 'lease_not_released':
+				$what = sprintf(
+					/* translators: 1: attachment ID, 2: date and time. */
+					__( 'A conversion of attachment %1$d finished publishing a file but did not release its lock (since %2$s).', 'trust-optimize' ),
+					$id,
+					$since
+				);
+				break;
+			case 'legacy':
+				$what = sprintf(
+					/* translators: 1: attachment ID, 2: date and time. */
+					__( 'A conversion of attachment %1$d that started before an update of the plugin has been running since %2$s.', 'trust-optimize' ),
+					$id,
+					$since
+				);
+				break;
+			default:
+				$what = sprintf(
+					/* translators: 1: attachment ID, 2: date and time. */
+					__( 'A synchronous conversion of attachment %1$d (WP-CLI or REST) has been running since %2$s.', 'trust-optimize' ),
+					$id,
+					$since
+				);
+		}
+
+		return array(
+			'key'     => 'held:' . $id . ':' . $attempt['since'],
+			'type'    => 'warning',
+			'message' => esc_html(
+				$what . ' ' . sprintf(
+					/* translators: %d: attachment ID. */
+					__( 'Make sure that process has ended or stop it; the age of the record does not prove it; then run `wp trust-optimize release %d`.', 'trust-optimize' ),
+					$id
+				)
+			),
+		);
 	}
 }

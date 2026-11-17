@@ -147,7 +147,10 @@ $trust_optimize_server_checks = array(
 		<p class="description">
 			<?php
 			/* translators: %d: most attachments waiting on the queue. */
-			echo esc_html( sprintf( __( 'Pause and Cancel stop adding new attachments to the queue; attachments already queued (up to %d) are still processed.', 'trust-optimize' ), $trust_optimize_max_pending ) );
+			echo esc_html( sprintf( __( 'Pause stops adding new attachments to the queue; attachments already queued (up to %d) are parked until you resume the job.', 'trust-optimize' ), $trust_optimize_max_pending ) );
+			echo ' ';
+			/* translators: %d: most attachments waiting on the queue. */
+			echo esc_html( sprintf( __( 'Cancel also stops adding new attachments; attachments already queued (up to %d) are still processed.', 'trust-optimize' ), $trust_optimize_max_pending ) );
 			?>
 		</p>
 
@@ -165,6 +168,7 @@ $trust_optimize_server_checks = array(
 				<tr data-types="sync"><th><?php esc_html_e( 'Skipped', 'trust-optimize' ); ?></th><td data-field="skipped">0</td></tr>
 				<tr data-types="remove"><th><?php esc_html_e( 'Cleaned up', 'trust-optimize' ); ?></th><td data-field="deleted_count">0</td></tr>
 				<tr data-types="sync remove"><th><?php esc_html_e( 'Failed', 'trust-optimize' ); ?></th><td data-field="failed_count">0</td></tr>
+				<tr class="trust-optimize-queue-signals" hidden><th><?php esc_html_e( 'Queue', 'trust-optimize' ); ?></th><td data-field="queue_signals"></td></tr>
 				<tr class="trust-optimize-pause-reason" hidden><th><?php esc_html_e( 'Paused because', 'trust-optimize' ); ?></th><td data-field="pause_reason"></td></tr>
 				<tr class="trust-optimize-last-error" hidden><th><?php esc_html_e( 'Last error', 'trust-optimize' ); ?></th><td data-field="last_error"></td></tr>
 			</tbody>

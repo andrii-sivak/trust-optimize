@@ -124,7 +124,7 @@ class SchemaPendingTest extends WP_UnitTestCase {
 
 	public function test_the_notice_says_that_the_update_has_not_finished() {
 		$jobs    = new BulkJobRepository( new DatabaseManager() );
-		$notices = new Notices( $jobs, Plugin::get_instance()->bulk_producer, new CapabilityService(), new DatabaseManager() );
+		$notices = new Notices( $jobs, Plugin::get_instance()->bulk_producer, new CapabilityService(), new DatabaseManager(), Plugin::get_instance()->job_health );
 		set_current_screen( 'plugins' );
 
 		ob_start();

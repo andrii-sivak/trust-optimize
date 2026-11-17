@@ -484,6 +484,11 @@ class Admin {
 							PauseReason::UNKNOWN        => __( 'The reason is unknown.', 'trust-optimize' ),
 							'fallback'                  => __( 'The job was paused.', 'trust-optimize' ),
 						),
+						'queueSignals'      => array(
+							'stuck_claim' => __( 'A queued task has been running or claimed for more than 15 minutes, so its worker may have died.', 'trust-optimize' ),
+							'no_progress' => __( 'Tasks are due, but none has finished in the last 15 minutes.', 'trust-optimize' ),
+							'hint'        => __( 'Action Scheduler may not be running: check that WP-Cron or a system cron runs it.', 'trust-optimize' ),
+						),
 						'confirmReset'      => __( 'Are you sure you want to reset all settings to defaults?', 'trust-optimize' ),
 						'confirmRemove'     => __( 'Remove all TrustOptimize-generated files? Originals and WordPress thumbnails will be preserved.', 'trust-optimize' ),
 						'confirmCancel'     => __( 'Cancel the active bulk job? Already processed files will not be rolled back.', 'trust-optimize' ),

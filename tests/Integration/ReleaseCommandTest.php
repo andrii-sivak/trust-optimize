@@ -39,6 +39,10 @@ if ( ! class_exists( 'WP_CLI' ) ) {
 			self::$lines[] = 'Success: ' . $message;
 		}
 
+		public static function warning( $message ) {
+			self::$lines[] = 'Warning: ' . $message;
+		}
+
 		public static function error( $message ) {
 			throw new RuntimeException( $message );
 		}
@@ -270,5 +274,46 @@ class ReleaseCommandTest extends WP_UnitTestCase {
 
 		update_option( 'trust_optimize_db_version', '1.1.0' );
 		$this->assertStringContainsString( 'database update has not finished', $this->run_release( array( '1009' ) ) );
+	}
+
+	public function test_pause_says_where_queued_attachments_wait_and_cancel_keeps_its_own_sentence() {
+		$job = Plugin::get_instance()->bulk_producer->launch( TrustOptimize\Bulk\BulkJob::TYPE_SYNC );
+		$this->assertNotFalse( $job );
+
+		$this->command->pause();
+		$this->assertStringContainsString( 'are parked until Resume', implode( "\n", WP_CLI::$lines ) );
+
+		WP_CLI::$lines = array();
+		$this->command->cancel();
+		$this->assertStringContainsString( 'will still be processed', implode( "\n", WP_CLI::$lines ) );
+	}
+
+	public function test_resume_warns_while_the_queue_looks_stuck() {
+		global $wpdb;
+
+		$job = Plugin::get_instance()->bulk_producer->launch( TrustOptimize\Bulk\BulkJob::TYPE_SYNC );
+		$this->command->pause();
+		$action = as_enqueue_async_action( ConversionQueue::HOOK_PROCESS, array( 'attachment_id' => 1 ), ConversionQueue::GROUP );
+		$wpdb->update( $wpdb->actionscheduler_actions, array( 'status' => 'in-progress', 'last_attempt_gmt' => gmdate( 'Y-m-d H:i:s', time() - 2000 ) ), array( 'action_id' => $action ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		WP_CLI::$lines = array();
+
+		$this->command->resume();
+
+		$output = implode( "\n", WP_CLI::$lines );
+		$this->assertStringContainsString( 'Success: Job #' . $job->get_id() . ' resume requested', $output );
+		$this->assertStringContainsString( 'Warning: The queue looks stuck (stuck_claim)', $output );
+	}
+
+	public function test_a_sync_of_a_held_attachment_is_refused_with_its_source_and_time() {
+		$this->attachments->claim( 1010, AttachmentRepository::SOURCE_SYNC );
+		$id = self::factory()->attachment->create_upload_object( DIR_TESTDATA . '/images/test-image.jpg' );
+		$this->attachments->claim( $id, AttachmentRepository::SOURCE_QUEUE );
+
+		try {
+			$this->command->sync_attachment( array( (string) $id ) );
+			$this->fail( 'The sync was expected to be refused.' );
+		} catch ( RuntimeException $error ) {
+			$this->assertStringContainsString( 'A conversion of this attachment is running (source: queue, since', $error->getMessage() );
+		}
 	}
 }
