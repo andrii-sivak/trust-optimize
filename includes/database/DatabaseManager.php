@@ -41,15 +41,16 @@ class DatabaseManager {
 	}
 
 	/**
-	 * Whether this site's stored schema version is the current one.
+	 * Whether this site's stored schema version has reached a version.
 	 *
-	 * Writers that touch columns of the newest schema use it to fall back to the older shape
+	 * Writers that touch columns of a newer schema use it to fall back to the older shape
 	 * while the migration has not finished.
 	 *
+	 * @param string $version Schema version that introduced the columns.
 	 * @return bool
 	 */
-	public function is_current() {
-		return version_compare( get_option( 'trust_optimize_db_version', '0.0.0' ), self::DB_VERSION, '>=' );
+	public function has_schema( $version ) {
+		return version_compare( get_option( 'trust_optimize_db_version', '0.0.0' ), $version, '>=' );
 	}
 
 	/**

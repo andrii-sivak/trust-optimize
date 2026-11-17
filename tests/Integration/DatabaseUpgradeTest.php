@@ -163,12 +163,12 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 
 		try {
 			$ids = $this->downgrade_jobs( $jobs );
-			$this->assertFalse( $database->is_current() );
+			$this->assertFalse( $database->has_schema( '1.1.0' ) );
 
 			$database->check_version();
 
 			$this->assertSame( '1.1.0', get_option( 'trust_optimize_db_version' ) );
-			$this->assertTrue( $database->is_current() );
+			$this->assertTrue( $database->has_schema( '1.1.0' ) );
 			foreach ( array( 'processed', 'skipped', 'failed_count', 'created_count', 'deleted_count', 'profile_hash' ) as $column ) {
 				$this->assertNull( $this->column_type( $jobs, $column ), $column );
 			}
@@ -318,7 +318,7 @@ class DatabaseUpgradeTest extends WP_UnitTestCase {
 
 		try {
 			$this->downgrade_jobs( $jobs );
-			$this->assertFalse( $database->is_current() );
+			$this->assertFalse( $database->has_schema( '1.1.0' ) );
 
 			$stale = $insert( 'running', 'earlier failure', gmdate( 'Y-m-d H:i:s', time() - HOUR_IN_SECONDS ) );
 			$this->assertSame( 1, $repo->recover_stale_running( 900 ) );

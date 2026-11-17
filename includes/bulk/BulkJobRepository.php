@@ -275,7 +275,7 @@ class BulkJobRepository {
 		global $wpdb;
 
 		$now   = current_time( 'mysql', true );
-		$clear = $this->db_manager->is_current() ? ', pause_reason = NULL' : '';
+		$clear = $this->db_manager->has_schema( '1.1.0' ) ? ', pause_reason = NULL' : '';
 
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared
 		$changed = $wpdb->query(
@@ -324,7 +324,7 @@ class BulkJobRepository {
 	 * @return array
 	 */
 	private function pause_data( $reason, $message = null ) {
-		if ( $this->db_manager->is_current() ) {
+		if ( $this->db_manager->has_schema( '1.1.0' ) ) {
 			return array(
 				'status'       => JobStatus::PAUSED,
 				'pause_reason' => $reason,
@@ -349,7 +349,7 @@ class BulkJobRepository {
 	public function pause_unfinished( $reason ) {
 		global $wpdb;
 
-		$column = $this->db_manager->is_current() ? 'pause_reason' : 'last_error';
+		$column = $this->db_manager->has_schema( '1.1.0' ) ? 'pause_reason' : 'last_error';
 
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery
 		return (int) $wpdb->query(
@@ -489,7 +489,7 @@ class BulkJobRepository {
 			$message = null;
 
 			// On the old schema the reason is the last error; the pause_reason column makes that text unnecessary.
-			if ( ! $this->db_manager->is_current() ) {
+			if ( ! $this->db_manager->has_schema( '1.1.0' ) ) {
 				$message = sprintf(
 					'Bulk job recovered from stale running state after %d seconds of inactivity. Resume is required.',
 					$stale_after_seconds
@@ -583,7 +583,7 @@ class BulkJobRepository {
 		$data['updated_at'] = current_time( 'mysql', true );
 		$data               = array_intersect_key( $data, array_flip( self::UPDATABLE_COLUMNS ) );
 
-		if ( ! $this->db_manager->is_current() ) {
+		if ( ! $this->db_manager->has_schema( '1.1.0' ) ) {
 			unset( $data['pause_reason'] );
 		}
 
