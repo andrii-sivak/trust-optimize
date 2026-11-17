@@ -4,3 +4,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-raise-minimums.md`
   summary: Nothing checks that `Requires at least` and `Requires PHP` agree between `trust-optimize.php` and `readme.txt` (and that the lowest CI row tests that minimum); `scripts/build-release.sh` checks only `Version`, `TRUST_OPTIMIZE_VERSION` and `Stable tag`.
   evidence: Pre-existing gap found by the verification-gap review of the minimums change: a partial bump of one header would pass phpcs, all tests and the release build. A few lines next to the `Stable tag` check in `scripts/build-release.sh` would close it.
+- source_spec: `_bmad-output/implementation-artifacts/spec-jobs-pause-reason-schema.md`
+  summary: `DatabaseManager::check_version()` stores the schema version without confirming that `dbDelta()` created the attachments and variants tables, so a failed create on a fresh install is marked current and never retried.
+  evidence: Pre-existing in 1.0.0 (version stored right after `create_tables()`); the 1.1.0 migration confirms only `jobs.pause_reason` via `SHOW COLUMNS`. Found by the edge-case review of the pause_reason schema change.

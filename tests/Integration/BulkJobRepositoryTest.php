@@ -126,7 +126,10 @@ class BulkJobRepositoryTest extends WP_UnitTestCase {
 		$this->age( $job->get_id(), 16 * MINUTE_IN_SECONDS );
 
 		$this->assertSame( 1, $this->jobs->recover_stale_running() );
-		$this->assertSame( JobStatus::PAUSED, $this->row( $job->get_id() )['status'] );
+		$row = $this->row( $job->get_id() );
+		$this->assertSame( JobStatus::PAUSED, $row['status'] );
+		$this->assertSame( 'stopped', $row['pause_reason'] );
+		$this->assertNull( $row['last_error'], 'The reason does not go to the last error.' );
 	}
 
 	public function test_a_fresh_job_stays_running_on_a_site_west_of_utc() {
@@ -167,5 +170,46 @@ class BulkJobRepositoryTest extends WP_UnitTestCase {
 		$this->age( $id, DAY_IN_SECONDS );
 		$this->jobs->pause_unfinished( 'deactivated' );
 		$this->assertEqualsWithDelta( time(), strtotime( $this->row( $id )['updated_at'] . ' UTC' ), 5 );
+	}
+
+	public function test_a_user_pause_is_stored_and_resume_clears_it() {
+		$id = $this->jobs->create( 'library' )->get_id();
+		$this->jobs->mark_running( $id );
+
+		$this->assertTrue( $this->jobs->pause( $id ) );
+		$this->assertSame( 'user', $this->row( $id )['pause_reason'] );
+		$this->assertNull( $this->row( $id )['last_error'] );
+
+		$this->assertTrue( $this->jobs->mark_running( $id ) );
+		$this->assertNull( $this->row( $id )['pause_reason'] );
+	}
+
+	public function test_cancel_and_complete_from_a_pause_clear_the_reason() {
+		foreach ( array( 'cancel', 'complete' ) as $method ) {
+			$id = $this->jobs->create( 'library' )->get_id();
+			$this->jobs->pause( $id, 'low_disk_space' );
+			$this->assertSame( 'low_disk_space', $this->row( $id )['pause_reason'] );
+
+			$this->jobs->$method( $id );
+
+			$this->assertNull( $this->row( $id )['pause_reason'], $method );
+		}
+	}
+
+	public function test_stale_recovery_leaves_an_existing_last_error_untouched() {
+		global $wpdb;
+
+		$id = $this->jobs->create( 'library' )->get_id();
+		$this->jobs->mark_running( $id );
+		$error = "earlier failure\nsecond line";
+		$wpdb->update( $wpdb->prefix . 'trust_optimize_jobs', array( 'last_error' => $error ), array( 'id' => $id ) );
+		$this->age( $id, 16 * MINUTE_IN_SECONDS );
+
+		$this->assertSame( 1, $this->jobs->recover_stale_running() );
+
+		$row = $this->row( $id );
+		$this->assertSame( JobStatus::PAUSED, $row['status'] );
+		$this->assertSame( 'stopped', $row['pause_reason'] );
+		$this->assertSame( $error, $row['last_error'] );
 	}
 }

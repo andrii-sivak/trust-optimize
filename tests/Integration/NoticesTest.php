@@ -102,7 +102,7 @@ class NoticesTest extends WP_UnitTestCase {
 
 	public function test_a_job_paused_for_disk_space_offers_resume_and_resumes() {
 		$job = Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
-		$this->jobs->pause( $job->get_id(), BulkProducer::REASON_LOW_DISK );
+		$this->jobs->pause( $job->get_id(), 'low_disk_space' );
 
 		$html = $this->html();
 
@@ -114,6 +114,19 @@ class NoticesTest extends WP_UnitTestCase {
 
 		$this->assertSame( JobStatus::RUNNING, $this->jobs->get( $job->get_id() )->get_status() );
 		$this->assertSame( '', $this->html() );
+	}
+
+	public function test_a_job_paused_for_disk_space_before_the_migration_still_shows_the_notice() {
+		$job = Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
+		update_option( 'trust_optimize_db_version', '1.0.0' );
+
+		try {
+			$this->jobs->pause( $job->get_id(), 'low_disk_space' );
+
+			$this->assertStringContainsString( 'disk is almost full', $this->html() );
+		} finally {
+			update_option( 'trust_optimize_db_version', DatabaseManager::DB_VERSION );
+		}
 	}
 
 	public function test_a_paused_job_with_another_reason_has_no_notice() {

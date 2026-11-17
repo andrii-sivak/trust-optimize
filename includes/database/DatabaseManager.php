@@ -7,6 +7,9 @@
 
 namespace TrustOptimize\Database;
 
+use TrustOptimize\Domain\JobStatus;
+use TrustOptimize\Domain\PauseReason;
+
 /**
  * Class DatabaseManager
  * Manages custom database operations for the plugin
@@ -16,7 +19,7 @@ class DatabaseManager {
 	/**
 	 * Current database version
 	 */
-	const DB_VERSION = '1.0.0';
+	const DB_VERSION = '1.1.0';
 
 	/**
 	 * Register the schema version check.
@@ -32,10 +35,103 @@ class DatabaseManager {
 	public function check_version() {
 		$db_version = get_option( 'trust_optimize_db_version', '0.0.0' );
 
-		if ( version_compare( $db_version, self::DB_VERSION, '<' ) ) {
-			$this->create_tables();
+		if ( version_compare( $db_version, self::DB_VERSION, '<' ) && $this->migrate() ) {
 			update_option( 'trust_optimize_db_version', self::DB_VERSION );
 		}
+	}
+
+	/**
+	 * Whether this site's stored schema version is the current one.
+	 *
+	 * Writers that touch columns of the newest schema use it to fall back to the older shape
+	 * while the migration has not finished.
+	 *
+	 * @return bool
+	 */
+	public function is_current() {
+		return version_compare( get_option( 'trust_optimize_db_version', '0.0.0' ), self::DB_VERSION, '>=' );
+	}
+
+	/**
+	 * Bring the schema to the current version. Every step checks the live schema, so a run
+	 * after a partial one finishes the work and a run on a migrated site changes nothing.
+	 *
+	 * @return bool True when every step succeeded.
+	 */
+	private function migrate() {
+		global $wpdb;
+
+		$this->create_tables();
+
+		$jobs = $this->get_table_name( 'trust_optimize_jobs' );
+
+		// dbDelta() reports no failure, so confirm its result.
+		if ( ! $this->column_exists( $jobs, 'pause_reason' ) ) {
+			return false;
+		}
+
+		$paused   = JobStatus::PAUSED;
+		$reasons  = array( PauseReason::DEACTIVATED, PauseReason::LOW_DISK_SPACE );
+		$backfill = array(
+			// A reason the old code kept in last_error moves to its own column.
+			array(
+				'UPDATE %i SET pause_reason = last_error, last_error = NULL WHERE status = %s AND pause_reason IS NULL AND last_error IN (%s, %s)',
+				array( $jobs, $paused, $reasons[0], $reasons[1] ),
+			),
+			// Every other pause writer stored a non-empty last_error, so a pause without one is the user's.
+			array(
+				"UPDATE %i SET pause_reason = %s WHERE status = %s AND pause_reason IS NULL AND ( last_error IS NULL OR last_error = '' )",
+				array( $jobs, PauseReason::USER, $paused ),
+			),
+			array(
+				'UPDATE %i SET pause_reason = %s WHERE status = %s AND pause_reason IS NULL',
+				array( $jobs, PauseReason::UNKNOWN, $paused ),
+			),
+			// A column that survived a failed run can hold a reason on a job that has moved on since.
+			array(
+				'UPDATE %i SET pause_reason = NULL WHERE status <> %s AND pause_reason IS NOT NULL',
+				array( $jobs, $paused ),
+			),
+			// The codes are not errors in any other status either.
+			array(
+				'UPDATE %i SET last_error = NULL WHERE status <> %s AND last_error IN (%s, %s)',
+				array( $jobs, $paused, $reasons[0], $reasons[1] ),
+			),
+		);
+
+		foreach ( $backfill as $step ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared
+			if ( false === $wpdb->query( $wpdb->prepare( $step[0], $step[1] ) ) ) {
+				return false;
+			}
+		}
+
+		foreach ( array( 'processed', 'skipped', 'failed_count', 'created_count', 'deleted_count', 'profile_hash' ) as $column ) {
+			if ( ! $this->column_exists( $jobs, $column ) ) {
+				continue;
+			}
+
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared
+			if ( false === $wpdb->query( $wpdb->prepare( 'ALTER TABLE %i DROP COLUMN %i', $jobs, $column ) ) ) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/**
+	 * Check the live schema for a column.
+	 *
+	 * @param string $table  Full table name.
+	 * @param string $column Column name.
+	 * @return bool
+	 */
+	private function column_exists( $table, $column ) {
+		global $wpdb;
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		return null !== $wpdb->get_row( $wpdb->prepare( 'SHOW COLUMNS FROM %i LIKE %s', $table, $wpdb->esc_like( $column ) ) );
 	}
 
 	/**
@@ -56,13 +152,8 @@ class DatabaseManager {
 			status varchar(32) NOT NULL DEFAULT 'pending',
 			cursor_id bigint(20) unsigned NOT NULL DEFAULT 0,
 			total int unsigned NOT NULL DEFAULT 0,
-			processed int unsigned NOT NULL DEFAULT 0,
-			skipped int unsigned NOT NULL DEFAULT 0,
-			failed_count int unsigned NOT NULL DEFAULT 0,
-			created_count int unsigned NOT NULL DEFAULT 0,
-			deleted_count int unsigned NOT NULL DEFAULT 0,
 			settings_snapshot longtext NULL,
-			profile_hash varchar(64) NOT NULL DEFAULT '',
+			pause_reason varchar(32) NULL,
 			last_error text NULL,
 			started_at datetime NULL,
 			updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,

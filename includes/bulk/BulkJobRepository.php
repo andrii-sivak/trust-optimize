@@ -9,6 +9,7 @@ namespace TrustOptimize\Bulk;
 
 use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Domain\JobStatus;
+use TrustOptimize\Domain\PauseReason;
 
 /**
  * Class BulkJobRepository
@@ -52,13 +53,8 @@ class BulkJobRepository {
 		'status',
 		'cursor_id',
 		'total',
-		'processed',
-		'skipped',
-		'failed_count',
-		'created_count',
-		'deleted_count',
 		'settings_snapshot',
-		'profile_hash',
+		'pause_reason',
 		'last_error',
 		'started_at',
 		'updated_at',
@@ -278,12 +274,13 @@ class BulkJobRepository {
 	public function mark_running( $job_id ) {
 		global $wpdb;
 
-		$now = current_time( 'mysql', true );
+		$now   = current_time( 'mysql', true );
+		$clear = $this->db_manager->is_current() ? ', pause_reason = NULL' : '';
 
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared
 		$changed = $wpdb->query(
 			$wpdb->prepare(
-				'UPDATE %i SET status = %s, started_at = COALESCE(started_at, %s), updated_at = %s WHERE id = %d AND status IN (%s, %s, %s)',
+				'UPDATE %i SET status = %s, started_at = COALESCE(started_at, %s), updated_at = %s' . $clear . ' WHERE id = %d AND status IN (%s, %s, %s)',
 				$this->get_table_name(),
 				JobStatus::RUNNING,
 				$now,
@@ -308,35 +305,59 @@ class BulkJobRepository {
 	/**
 	 * Pause a job that has not finished.
 	 *
-	 * @param int         $job_id Job ID.
-	 * @param string|null $reason Why it was paused by the plugin (stored as the last error).
+	 * @param int    $job_id Job ID.
+	 * @param string $reason PauseReason value.
 	 * @return bool True when the job was paused.
 	 */
-	public function pause( $job_id, $reason = null ) {
-		$data = array( 'status' => JobStatus::PAUSED );
+	public function pause( $job_id, $reason = PauseReason::USER ) {
+		return $this->transition( $job_id, array( JobStatus::PENDING, JobStatus::RUNNING ), $this->pause_data( $reason ) );
+	}
 
-		if ( null !== $reason ) {
-			$data['last_error'] = $reason;
+	/**
+	 * Columns that pause a job for a reason, in the shape the stored schema has.
+	 *
+	 * Until the migration to the pause_reason column has finished the reason goes to last_error
+	 * as it used to, so a pause always lands; the migration maps that row later.
+	 *
+	 * @param string      $reason  PauseReason value.
+	 * @param string|null $message Text for last_error on the old schema, defaults to the reason.
+	 * @return array
+	 */
+	private function pause_data( $reason, $message = null ) {
+		if ( $this->db_manager->is_current() ) {
+			return array(
+				'status'       => JobStatus::PAUSED,
+				'pause_reason' => $reason,
+			);
 		}
 
-		return $this->transition( $job_id, array( JobStatus::PENDING, JobStatus::RUNNING ), $data );
+		$data = array( 'status' => JobStatus::PAUSED );
+
+		if ( PauseReason::USER !== $reason ) {
+			$data['last_error'] = null === $message ? $reason : $message;
+		}
+
+		return $data;
 	}
 
 	/**
 	 * Pause every job that is not paused or finished (the plugin is being deactivated).
 	 *
-	 * @param string $reason Stored as the last error.
+	 * @param string $reason PauseReason value.
 	 * @return int Number of jobs paused.
 	 */
 	public function pause_unfinished( $reason ) {
 		global $wpdb;
 
+		$column = $this->db_manager->is_current() ? 'pause_reason' : 'last_error';
+
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery
 		return (int) $wpdb->query(
 			$wpdb->prepare(
-				'UPDATE %i SET status = %s, last_error = %s, updated_at = %s WHERE status IN (%s, %s)',
+				'UPDATE %i SET status = %s, %i = %s, updated_at = %s WHERE status IN (%s, %s)',
 				$this->get_table_name(),
 				JobStatus::PAUSED,
+				$column,
 				$reason,
 				current_time( 'mysql', true ),
 				JobStatus::PENDING,
@@ -465,23 +486,26 @@ class BulkJobRepository {
 		$recovered           = 0;
 
 		foreach ( $this->find_stale_running( $stale_after_seconds ) as $job ) {
-			$data    = $job->to_array();
-			$message = sprintf(
-				'Bulk job recovered from stale running state after %d seconds of inactivity. Resume is required.',
-				$stale_after_seconds
-			);
+			$message = null;
 
-			if ( ! empty( $data['last_error'] ) ) {
-				$message = $data['last_error'] . "\n" . $message;
+			// On the old schema the reason is the last error; the pause_reason column makes that text unnecessary.
+			if ( ! $this->db_manager->is_current() ) {
+				$message = sprintf(
+					'Bulk job recovered from stale running state after %d seconds of inactivity. Resume is required.',
+					$stale_after_seconds
+				);
+
+				$previous = $job->to_array()['last_error'] ?? '';
+
+				if ( ! empty( $previous ) ) {
+					$message = $previous . "\n" . $message;
+				}
 			}
 
 			if ( $this->transition(
 				$job->get_id(),
 				array( JobStatus::RUNNING ),
-				array(
-					'status'     => JobStatus::PAUSED,
-					'last_error' => $message,
-				)
+				$this->pause_data( PauseReason::STOPPED, $message )
 			) ) {
 				++$recovered;
 			}
@@ -533,9 +557,10 @@ class BulkJobRepository {
 	 * @return bool True when the job was finished by this call.
 	 */
 	private function finish( $job_id, $status, array $data = array() ) {
-		$data['status']      = $status;
-		$data['finished_at'] = current_time( 'mysql', true );
-		$finished            = $this->transition( $job_id, JobStatus::active(), $data );
+		$data['status']       = $status;
+		$data['pause_reason'] = null;
+		$data['finished_at']  = current_time( 'mysql', true );
+		$finished             = $this->transition( $job_id, JobStatus::active(), $data );
 
 		if ( $finished && $this->read_mutex() === (int) $job_id ) {
 			$this->release_mutex();
@@ -557,8 +582,13 @@ class BulkJobRepository {
 
 		$data['updated_at'] = current_time( 'mysql', true );
 		$data               = array_intersect_key( $data, array_flip( self::UPDATABLE_COLUMNS ) );
-		$sets               = array();
-		$values             = array( $this->get_table_name() );
+
+		if ( ! $this->db_manager->is_current() ) {
+			unset( $data['pause_reason'] );
+		}
+
+		$sets   = array();
+		$values = array( $this->get_table_name() );
 
 		foreach ( $data as $column => $value ) {
 			$values[] = $column;

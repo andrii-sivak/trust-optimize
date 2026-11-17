@@ -12,6 +12,7 @@ use TrustOptimize\Admin\Settings;
 use TrustOptimize\Capabilities\CapabilityService;
 use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Domain\JobStatus;
+use TrustOptimize\Domain\PauseReason;
 use TrustOptimize\Queue\ConversionQueue;
 use TrustOptimize\Service\ImageCleanupService;
 use TrustOptimize\Settings\OptimizationSettings;
@@ -57,11 +58,6 @@ class BulkProducer {
 	 * Seconds one run may spend handing attachments over.
 	 */
 	const DEFAULT_TIME_BUDGET = 20;
-
-	/**
-	 * Reason (stored as the last error) of a job paused for lack of disk space.
-	 */
-	const REASON_LOW_DISK = 'low_disk_space';
 
 	/**
 	 * Job repository.
@@ -201,7 +197,7 @@ class BulkProducer {
 	 * @return bool
 	 */
 	public function pause( $job_id ) {
-		$paused = $this->jobs->pause( $job_id );
+		$paused = $this->jobs->pause( $job_id, PauseReason::USER );
 
 		if ( $paused ) {
 			$this->unschedule( $job_id );
@@ -249,7 +245,7 @@ class BulkProducer {
 
 		if ( BulkJob::TYPE_SYNC === $job->get_type() ) {
 			if ( DiskSpace::is_low() ) {
-				$this->jobs->pause( $job->get_id(), self::REASON_LOW_DISK );
+				$this->jobs->pause( $job->get_id(), PauseReason::LOW_DISK_SPACE );
 				return;
 			}
 

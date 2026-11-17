@@ -10,6 +10,7 @@ use TrustOptimize\Capabilities\CapabilityService;
 use TrustOptimize\Core\Plugin;
 use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Domain\AttachmentState;
+use TrustOptimize\Domain\PauseReason;
 use TrustOptimize\Storage\AttachmentRepository;
 use TrustOptimize\Storage\VariantRepository;
 
@@ -97,6 +98,21 @@ class AdminPagesTest extends WP_UnitTestCase {
 		$this->assertMatchesRegularExpression( '/data-action="pause" hidden/', $html );
 		$this->assertMatchesRegularExpression( '/data-action="resume" hidden/', $html );
 		$this->assertMatchesRegularExpression( '/data-action="cancel" hidden/', $html );
+	}
+
+	public function test_the_bulk_tab_has_a_hidden_pause_reason_row_and_every_reason_has_a_label() {
+		$html = $this->overview();
+
+		$this->assertMatchesRegularExpression( '/<tr class="trust-optimize-pause-reason" hidden>.*data-field="pause_reason"/', $html );
+
+		Plugin::get_instance()->admin->enqueue_admin_scripts( 'toplevel_page_trust-optimize' );
+		$data = wp_scripts()->get_data( 'trust-optimize-admin', 'data' );
+		$this->assertSame( 1, preg_match( '/var trustOptimizeAdmin = (\{.*\});/s', $data, $match ) );
+		$labels = json_decode( $match[1], true )['i18n']['pauseReasons'];
+
+		foreach ( array_merge( PauseReason::all(), array( 'fallback' ) ) as $key ) {
+			$this->assertNotEmpty( $labels[ $key ] ?? '', $key );
+		}
 	}
 
 	private function settings_page() {

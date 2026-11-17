@@ -165,6 +165,7 @@ $trust_optimize_server_checks = array(
 				<tr data-types="sync"><th><?php esc_html_e( 'Skipped', 'trust-optimize' ); ?></th><td data-field="skipped">0</td></tr>
 				<tr data-types="remove"><th><?php esc_html_e( 'Cleaned up', 'trust-optimize' ); ?></th><td data-field="deleted_count">0</td></tr>
 				<tr data-types="sync remove"><th><?php esc_html_e( 'Failed', 'trust-optimize' ); ?></th><td data-field="failed_count">0</td></tr>
+				<tr class="trust-optimize-pause-reason" hidden><th><?php esc_html_e( 'Paused because', 'trust-optimize' ); ?></th><td data-field="pause_reason"></td></tr>
 				<tr class="trust-optimize-last-error" hidden><th><?php esc_html_e( 'Last error', 'trust-optimize' ); ?></th><td data-field="last_error"></td></tr>
 			</tbody>
 		</table>

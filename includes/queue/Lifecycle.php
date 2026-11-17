@@ -9,6 +9,7 @@ namespace TrustOptimize\Queue;
 
 use TrustOptimize\Bulk\BulkJobRepository;
 use TrustOptimize\Database\DatabaseManager;
+use TrustOptimize\Domain\PauseReason;
 use TrustOptimize\Storage\AttachmentRepository;
 use TrustOptimize\Storage\VariantRepository;
 
@@ -28,7 +29,7 @@ class Lifecycle {
 	const HOOK_RESTORE = 'trust_optimize_restore_queue';
 
 	/**
-	 * Reason stored on suspended attachments and paused jobs.
+	 * Reason stored on suspended attachments.
 	 */
 	const REASON = 'deactivated';
 
@@ -81,7 +82,7 @@ class Lifecycle {
 		}
 
 		$attachments->suspend_unfinished( self::REASON );
-		( new BulkJobRepository( $database ) )->pause_unfinished( self::REASON );
+		( new BulkJobRepository( $database ) )->pause_unfinished( PauseReason::DEACTIVATED );
 	}
 
 	/**
