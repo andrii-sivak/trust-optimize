@@ -168,7 +168,7 @@ Filters:
 * `trust_optimize_bulk_batch_size` ( int ) – attachments queued per producer run (default 25).
 * `trust_optimize_bulk_max_pending` ( int ) – pending tasks the bulk job keeps queued (default 200).
 * `trust_optimize_bulk_time_budget` ( int $seconds ) – time of one producer run (default 20).
-* `trust_optimize_bulk_stale_after_seconds` ( int ) – a running job without progress is considered stale after this time (default 900). A job that was resumed while the queue is stuck is not stopped again for the same stoppage.
+* `trust_optimize_bulk_stale_after_seconds` ( int ) – a running job without progress is considered stale after this time (default 900), and a conversion attempt is recovered as dead only after this time too (never less than 900). Raise it when single conversions take long: a higher value gives slow encodes time, and delays the recovery of an attempt that really died. An encode that outlasts the value can still be recovered while its PHP process lives. A job that was resumed while the queue is stuck is not stopped again for the same stoppage.
 * `trust_optimize_uninstall_cleanup_batch_size` ( int ) – attachments cleaned per step on uninstall (default 100).
 * `trust_optimize_uninstall_cleanup_max_records` ( int ) – attachments cleaned per site in one uninstall request (default 5000).
 * `trust_optimize_uninstall_cleanup_max_seconds` ( float ) – time one uninstall request spends per site (default 20).

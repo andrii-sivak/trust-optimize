@@ -17,6 +17,7 @@ use TrustOptimize\Domain\JobStatus;
 use TrustOptimize\Domain\PauseReason;
 use TrustOptimize\Domain\VariantStatus;
 use TrustOptimize\Queue\ConversionQueue;
+use TrustOptimize\Queue\Maintenance;
 use TrustOptimize\Storage\AttachmentRepository;
 use TrustOptimize\Storage\VariantRepository;
 
@@ -622,5 +623,75 @@ class JobHealthTest extends WP_UnitTestCase {
 		} finally {
 			remove_filter( 'wp_doing_cron', '__return_true' );
 		}
+	}
+
+	private function set_threshold( $seconds ) {
+		add_filter(
+			'trust_optimize_bulk_stale_after_seconds',
+			static function () use ( $seconds ) {
+				return $seconds;
+			}
+		);
+	}
+
+	public function test_a_raised_threshold_stretches_the_recovery_wait_on_every_path_that_runs_step_one() {
+		$this->set_threshold( 3600 );
+		$job = $this->silent_job( 4000 );
+		$id  = 860;
+		$this->claimed( $id, $job, 1200 );
+		$action = as_enqueue_async_action( ConversionQueue::HOOK_PROCESS, array( 'attachment_id' => $id ), ConversionQueue::GROUP );
+		$this->make_action_old( $action, 1200, ActionScheduler_Store::STATUS_FAILED );
+
+		$this->health->check_admin_load();
+		$this->assertSame( 0, ( new Maintenance( $this->attachments, Plugin::get_instance()->conversion_queue, $this->health ) )->run() );
+		$this->assertSame( AttachmentState::PROCESSING, $this->attachments->get_state( $id ), 'Neither an admin load nor Maintenance recovers it.' );
+		$this->assertSame( JobStatus::RUNNING, $this->status( $job ), 'And the job is not stopped.' );
+
+		$producer = Plugin::get_instance()->bulk_producer;
+		$this->assertTrue( $producer->pause( $job ) );
+		$this->assertTrue( $producer->resume( $job ) );
+		$this->assertSame( AttachmentState::PROCESSING, $this->attachments->get_state( $id ), 'Nor does Resume.' );
+	}
+
+	public function test_a_claim_past_the_raised_threshold_is_recovered_once_when_nothing_is_pending() {
+		$this->set_threshold( 3600 );
+		$job   = $this->silent_job( 4000 );
+		$id    = 861;
+		$token = $this->claimed( $id, $job, 3700 );
+
+		$this->assertSame( 1, $this->health->recover_attempts() );
+		$this->assertSame( 0, $this->health->recover_attempts() );
+
+		$row = $this->attachments->get( $id );
+		$this->assertSame( AttachmentState::QUEUED, $row['state'] );
+		$this->assertNotSame( $token, $row['attempt_token'] );
+		$this->assertNull( $row['attempt_token'] );
+	}
+
+	public function test_a_claim_past_the_raised_threshold_with_a_live_action_is_not_recovered() {
+		$this->set_threshold( 3600 );
+		$job = $this->silent_job( 4000 );
+		$id  = 862;
+		$this->claimed( $id, $job, 3700 );
+		$action = as_enqueue_async_action( ConversionQueue::HOOK_PROCESS, array( 'attachment_id' => $id ), ConversionQueue::GROUP );
+		$this->make_action_old( $action, 3700, ActionScheduler_Store::STATUS_RUNNING );
+
+		$this->assertSame( 0, $this->health->recover_attempts() );
+		$this->assertSame( AttachmentState::PROCESSING, $this->attachments->get_state( $id ) );
+	}
+
+	public function test_a_low_threshold_never_shortens_the_recovery_wait_below_900_seconds() {
+		$this->set_threshold( 300 );
+		$job = $this->silent_job( 700 );
+		$id  = 863;
+		$this->claimed( $id, $job, 600 );
+
+		$this->assertSame( 0, $this->health->recover_attempts(), 'Claimed 600 s ago: protected.' );
+		$this->assertSame( 0, $this->health->stop_stale_jobs() );
+
+		$this->age_attachment( $id, 1000 );
+
+		$this->health->check_admin_load();
+		$this->assertSame( AttachmentState::QUEUED, $this->attachments->get_state( $id ), 'Past 900 s the dead attempt is recovered.' );
 	}
 }
