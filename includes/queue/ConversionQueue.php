@@ -170,7 +170,7 @@ class ConversionQueue {
 			return false;
 		}
 
-		return $this->schedule_or_park( $attachment_id, self::PRIORITY_CONVERSION );
+		return $this->schedule_or_park( $attachment_id );
 	}
 
 	/**
@@ -184,7 +184,7 @@ class ConversionQueue {
 
 		// The claim writes columns of the newest schema: wait for the migration instead of spending an attempt.
 		if ( ! $this->database->has_schema( DatabaseManager::SCHEMA_RECOVERY ) ) {
-			$this->schedule( $attachment_id, self::SCHEMA_RETRY_SECONDS, self::PRIORITY_CONVERSION );
+			$this->schedule( $attachment_id, self::SCHEMA_RETRY_SECONDS );
 			return;
 		}
 
@@ -242,11 +242,10 @@ class ConversionQueue {
 	 * Without a job the attachment stays queued for the maintenance task that repairs lost queued attachments.
 	 *
 	 * @param int $attachment_id Attachment ID.
-	 * @param int $priority      Action Scheduler priority; lower runs first.
 	 * @return bool True when an action was scheduled.
 	 */
-	private function schedule_or_park( $attachment_id, $priority = self::PRIORITY_SERVICE ) {
-		if ( $this->schedule( $attachment_id, 0, $priority ) ) {
+	private function schedule_or_park( $attachment_id ) {
+		if ( $this->schedule( $attachment_id ) ) {
 			return true;
 		}
 
@@ -260,18 +259,17 @@ class ConversionQueue {
 	 *
 	 * @param int $attachment_id Attachment ID.
 	 * @param int $delay         Seconds from now; 0 runs it as soon as a runner is free.
-	 * @param int $priority      Action Scheduler priority; lower runs first.
 	 * @return bool True when Action Scheduler accepted the action.
 	 */
-	private function schedule( $attachment_id, $delay = 0, $priority = self::PRIORITY_SERVICE ) {
+	private function schedule( $attachment_id, $delay = 0 ) {
 		$args = array( 'attachment_id' => (int) $attachment_id );
 
 		try {
 			if ( $delay > 0 ) {
-				return 0 !== as_schedule_single_action( time() + $delay, self::HOOK_PROCESS, $args, self::GROUP, false, $priority );
+				return 0 !== as_schedule_single_action( time() + $delay, self::HOOK_PROCESS, $args, self::GROUP, false, self::PRIORITY_CONVERSION );
 			}
 
-			return 0 !== as_enqueue_async_action( self::HOOK_PROCESS, $args, self::GROUP, false, $priority );
+			return 0 !== as_enqueue_async_action( self::HOOK_PROCESS, $args, self::GROUP, false, self::PRIORITY_CONVERSION );
 		} catch ( Throwable $throwable ) {
 			return false;
 		}

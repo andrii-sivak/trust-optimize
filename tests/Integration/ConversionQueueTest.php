@@ -134,6 +134,47 @@ class ConversionQueueTest extends WP_UnitTestCase {
 		$this->assertSame( array(), $this->pending_actions( $id ) );
 	}
 
+	private function priorities( $attachment_id ) {
+		$actions = as_get_scheduled_actions(
+			array(
+				'hook'   => ConversionQueue::HOOK_PROCESS,
+				'status' => ActionScheduler_Store::STATUS_PENDING,
+				'args'   => array( 'attachment_id' => $attachment_id ),
+			)
+		);
+
+		return array_values( array_map( static fn( $action ) => $action->get_priority(), $actions ) );
+	}
+
+	public function test_an_upload_is_queued_at_priority_20() {
+		$id = $this->upload();
+
+		$this->assertSame( array( 20 ), $this->priorities( $id ) );
+	}
+
+	public function test_a_continuation_after_the_time_budget_is_queued_at_priority_20() {
+		$id = $this->upload();
+		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+		add_filter( 'trust_optimize_worker_time_budget', '__return_zero' );
+
+		$this->queue()->process( $id );
+
+		$this->assertSame( array( 20 ), $this->priorities( $id ) );
+	}
+
+	public function test_a_requeued_attachment_is_queued_at_priority_20() {
+		$id = $this->upload();
+		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+		global $wpdb;
+		$tables = ( new DatabaseManager() )->get_plugin_table_names();
+		// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$tables['attachments']}` SET updated_at = %s WHERE attachment_id = %d", gmdate( 'Y-m-d H:i:s', time() - 1200 ), $id ) );
+
+		$this->assertTrue( $this->queue()->requeue( $id ) );
+
+		$this->assertSame( array( 20 ), $this->priorities( $id ) );
+	}
+
 	/**
 	 * The queue registered by the plugin on boot.
 	 *

@@ -243,7 +243,9 @@ class MaintenanceTest extends WP_UnitTestCase {
 
 		$this->maintenance->run();
 
-		$this->assertCount( 1, $this->pending( $id ) );
+		$actions = $this->pending( $id );
+		$this->assertCount( 1, $actions );
+		$this->assertSame( 20, reset( $actions )->get_priority() );
 	}
 
 	public function test_an_attachment_with_a_task_is_left_alone() {
@@ -261,6 +263,16 @@ class MaintenanceTest extends WP_UnitTestCase {
 
 		$this->assertSame( 0, $this->maintenance->run() );
 		$this->assertSame( AttachmentState::PROCESSING, $this->attachments->get_state( $id ) );
+	}
+
+	public function test_the_hourly_task_runs_at_priority_10() {
+		Maintenance::unschedule();
+		Maintenance::schedule();
+
+		$actions = as_get_scheduled_actions( array( 'hook' => Maintenance::HOOK, 'status' => ActionScheduler_Store::STATUS_PENDING ) );
+		$this->assertSame( 10, reset( $actions )->get_priority() );
+
+		Maintenance::unschedule();
 	}
 
 	public function test_the_task_is_scheduled_once() {
