@@ -174,6 +174,15 @@ class AttachmentProcessor {
 
 			if ( ! $plan->has_work() ) {
 				$state = AttachmentRepository::derive_state( $this->variants->count_by_status( $attachment_id ) );
+
+				// Only a claim stores "processing". A variant that is still marked so (its reset failed) ends the attempt as a failure.
+				if ( AttachmentState::PROCESSING === $state ) {
+					$message = 'A variant is still marked as processing.';
+					$this->attachments->finish( $attachment_id, $token, AttachmentState::FAILED, 'exception', $message );
+
+					return OptimizeResult::failed( 'exception', array( $message ), array( 'deleted' => $deleted ) );
+				}
+
 				$this->attachments->finish( $attachment_id, $token, $state );
 
 				return OptimizeResult::success(

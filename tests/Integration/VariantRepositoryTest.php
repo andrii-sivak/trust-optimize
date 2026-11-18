@@ -38,6 +38,46 @@ class VariantRepositoryTest extends WP_UnitTestCase {
 		);
 	}
 
+	/**
+	 * Move the timestamp of a variant into the past.
+	 *
+	 * @param int $id Variant ID.
+	 * @return string The timestamp.
+	 */
+	private function age( $id ) {
+		global $wpdb;
+
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['variants'];
+		$old   = gmdate( 'Y-m-d H:i:s', time() - DAY_IN_SECONDS );
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET updated_at = %s WHERE id = %d", $old, $id ) );
+		$this->repo->invalidate( 501 );
+
+		return $old;
+	}
+
+	public function test_upserting_an_existing_row_without_a_status_keeps_its_timestamp() {
+		$id = $this->repo->upsert( $this->variant( array( 'status' => VariantStatus::DONE ) ) );
+		$old = $this->age( $id );
+
+		$this->repo->upsert( $this->variant() );
+		$this->assertSame( $old, $this->repo->get_for_attachment( 501 )[0]['updated_at'], 'A racing planner insert is not a transition.' );
+
+		$this->repo->upsert( $this->variant( array( 'quality' => 70 ) ) );
+		$this->assertSame( $old, $this->repo->get_for_attachment( 501 )[0]['updated_at'] );
+		$this->assertSame( VariantStatus::DONE, $this->repo->get_for_attachment( 501 )[0]['status'] );
+	}
+
+	public function test_upserting_a_status_refreshes_the_timestamp() {
+		$id = $this->repo->upsert( $this->variant( array( 'status' => VariantStatus::DONE ) ) );
+		$old = $this->age( $id );
+
+		$this->repo->upsert( $this->variant( array( 'status' => VariantStatus::PENDING ) ) );
+
+		$this->assertNotSame( $old, $this->repo->get_for_attachment( 501 )[0]['updated_at'] );
+	}
+
 	public function test_upsert_is_idempotent_and_keeps_unspecified_columns() {
 		$id = $this->repo->upsert( $this->variant() );
 		$this->assertGreaterThan( 0, $id );
