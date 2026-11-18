@@ -22,8 +22,8 @@ use TrustOptimize\Storage\VariantRepository;
  * So an attempt is recovered only when it has been silent for longer than STALE_CLAIM_SECONDS, holds no
  * publication lease, and no Action Scheduler action of the attachment is pending or in progress.
  * An attempt that step 1 may not recover (a synchronous one, one from before the attempt record, one inside
- * a publication) is reported as held, for an operator to release. Step 2 stops a running job whose producer
- * has vanished, unless it was resumed while the queue is stuck and has simply not had a chance to work yet.
+ * a publication) is reported as held, for an operator to release. Step 2 stops a running job that shows no life:
+ * no producer step and no attempt evidence (a claim or a worker's variant change) within the stale threshold, unless it was resumed while the queue is stuck and has simply not had a chance to work yet.
  * The queue signals are diagnostics: they say what looks wrong with Action Scheduler and decide nothing.
  */
 class JobHealth {
@@ -340,9 +340,9 @@ class JobHealth {
 	}
 
 	/**
-	 * Step 2: stop the running jobs whose producer vanished.
+	 * Step 2: stop the running jobs that show no life.
 	 *
-	 * A job silent for longer than the threshold is stopped, except a Resume that has had no chance yet: no work
+	 * A job with neither a producer step nor attempt evidence within the threshold is stopped, except a Resume that has had no chance yet: no work
 	 * finished since it, and either its producer is still scheduled or the queue shows a signal. Such a job is
 	 * waiting for Action Scheduler, and stopping it again would undo the Resume.
 	 *
