@@ -192,3 +192,12 @@ context:
 1. Start a bulk with the filter at 120 s and slow conversions, and load wp-admin during the batch: the job stays running.
 2. In `wp action-scheduler action list --group=trust-optimize`, conversions have priority 20 and the producer 10; pending conversions stay within the limit plus two batches.
 3. Kill the worker and stop the runner: after the threshold an admin load stops the job (unchanged).
+
+## Implementation Notes
+
+- Variant evidence is one private predicate, `BulkJobRepository::attempt_evidence()`, used by `find_stale_running()` and by the sync branch of `has_progress_since_resume()`. A variant with `failed` and a NULL reason counts as a worker failure.
+- The poison refusal is `AttachmentProcessor::ATTEMPTS_EXHAUSTED`, reported by `run()` only when the claim missed, the row is not `processing` and `attempts >= MAX_ATTEMPTS`. `process()` then calls the new `AttachmentRepository::give_up()` (the poison CAS: `state` not `processing`/`failed`, `attempt_token IS NULL`, `attempts >= MAX`) and returns.
+- `ConversionQueue::schedule()` and `schedule_or_park()` lost their priority parameter once every conversion path used 20.
+- The sync `up_to_date` branch with a variant still `processing` now returns a failed result (`exception`) and ends the attempt `failed` / `exception`.
+- `VariantRepository::upsert()` with no column to update (no status, no other data) writes `id = id` to keep the statement valid.
+- Tests: no separate `QueueRecoveryTest` case was added; recovery at priority 20 is covered by `MaintenanceTest`. The `SchemaPendingTest` priority 20 assertion already existed. Tests that create AS actions leak pending actions into the test database; clean them as AGENTS.md describes.
