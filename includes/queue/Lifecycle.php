@@ -31,7 +31,7 @@ class Lifecycle {
 	/**
 	 * Reason stored on suspended attachments.
 	 */
-	const REASON = 'deactivated';
+	const REASON = AttachmentRepository::REASON_DEACTIVATED;
 
 	/**
 	 * Attachments queued again per run.

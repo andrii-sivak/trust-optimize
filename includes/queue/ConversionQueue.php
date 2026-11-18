@@ -10,6 +10,7 @@
 namespace TrustOptimize\Queue;
 
 use Throwable;
+use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Planning\VariantPlanner;
 use TrustOptimize\Processing\AttachmentProcessor;
@@ -29,6 +30,16 @@ class ConversionQueue {
 	 * Action Scheduler group name.
 	 */
 	const GROUP = 'trust-optimize';
+
+	/**
+	 * Seconds before a task that found the database update unfinished runs again.
+	 */
+	const SCHEMA_RETRY_SECONDS = HOUR_IN_SECONDS;
+
+	/**
+	 * Priority of tasks that continue work already started or that wait for the database update (Action Scheduler runs a lower number first, so these yield to default-priority tasks).
+	 */
+	const PRIORITY_RESUMED = 20;
 
 	/**
 	 * Attachment repository.
@@ -52,16 +63,25 @@ class ConversionQueue {
 	private $planner;
 
 	/**
+	 * Database manager.
+	 *
+	 * @var DatabaseManager
+	 */
+	private $database;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param AttachmentRepository $attachments Attachment repository.
 	 * @param AttachmentProcessor  $processor   Attachment processor.
 	 * @param VariantPlanner       $planner     Variant planner.
+	 * @param DatabaseManager      $database    Database manager.
 	 */
-	public function __construct( AttachmentRepository $attachments, AttachmentProcessor $processor, VariantPlanner $planner ) {
+	public function __construct( AttachmentRepository $attachments, AttachmentProcessor $processor, VariantPlanner $planner, DatabaseManager $database ) {
 		$this->attachments = $attachments;
 		$this->processor   = $processor;
 		$this->planner     = $planner;
+		$this->database    = $database;
 	}
 
 	/**
@@ -117,11 +137,11 @@ class ConversionQueue {
 			return false;
 		}
 
-		return $this->schedule( $attachment_id );
+		return $this->schedule_or_park( $attachment_id );
 	}
 
 	/**
-	 * Queue an attachment again whose task was lost or whose worker died.
+	 * Queue an attachment again whose task was lost.
 	 *
 	 * @param int $attachment_id Attachment ID.
 	 * @return bool True when an action was scheduled.
@@ -129,7 +149,23 @@ class ConversionQueue {
 	public function requeue( $attachment_id ) {
 		return function_exists( 'as_enqueue_async_action' )
 			&& $this->attachments->requeue( $attachment_id, AttachmentRepository::STALE_CLAIM_SECONDS )
-			&& $this->schedule( $attachment_id );
+			&& $this->schedule_or_park( $attachment_id );
+	}
+
+	/**
+	 * Schedule the action of an attachment a dead attempt left queued, at priority 20.
+	 *
+	 * Nothing is scheduled for an attachment that is not queued: it was parked behind a paused bulk job or given up.
+	 *
+	 * @param int $attachment_id Attachment ID.
+	 * @return bool True when an action was scheduled.
+	 */
+	public function schedule_recovered( $attachment_id ) {
+		if ( ! function_exists( 'as_enqueue_async_action' ) || AttachmentState::QUEUED !== $this->attachments->get_state( $attachment_id ) ) {
+			return false;
+		}
+
+		return $this->schedule_or_park( $attachment_id, self::PRIORITY_RESUMED );
 	}
 
 	/**
@@ -141,19 +177,28 @@ class ConversionQueue {
 	public function process( $attachment_id ) {
 		$attachment_id = (int) $attachment_id;
 
-		try {
-			$result = $this->processor->run( $attachment_id );
-		} catch ( Throwable $throwable ) {
-			// Only this attachment fails; Action Scheduler records the failed action.
-			$this->attachments->set_state( $attachment_id, AttachmentState::FAILED, 'exception', $throwable->getMessage() );
+		// The claim writes columns of the newest schema: wait for the migration instead of spending an attempt.
+		if ( ! $this->database->has_schema( DatabaseManager::SCHEMA_RECOVERY ) ) {
+			$this->schedule( $attachment_id, self::SCHEMA_RETRY_SECONDS, self::PRIORITY_RESUMED );
+			return;
+		}
 
-			throw $throwable;
+		$result = $this->processor->run( $attachment_id );
+
+		// Held by another worker, or the bulk job it belongs to is paused: park it when the job is, and when the park misses
+		// (the job was resumed meanwhile) take the claim once more.
+		if ( AttachmentProcessor::BUSY === $result->get_message() && $result->is_skipped() ) {
+			if ( $this->attachments->park( $attachment_id ) ) {
+				return;
+			}
+
+			$result = $this->processor->run( $attachment_id );
 		}
 
 		$data = $result->get_data();
 
 		if ( ! empty( $data['more'] ) ) {
-			$this->schedule( $attachment_id );
+			$this->schedule_or_park( $attachment_id );
 		}
 	}
 
@@ -187,12 +232,43 @@ class ConversionQueue {
 	}
 
 	/**
+	 * Schedule the action for a queued attachment; when that fails, park an attachment of an unfinished bulk job so its producer queues it again.
+	 *
+	 * Without a job the attachment stays queued for the maintenance task that repairs lost queued attachments.
+	 *
+	 * @param int $attachment_id Attachment ID.
+	 * @param int $priority      Action Scheduler priority; lower runs first.
+	 * @return bool True when an action was scheduled.
+	 */
+	private function schedule_or_park( $attachment_id, $priority = 10 ) {
+		if ( $this->schedule( $attachment_id, 0, $priority ) ) {
+			return true;
+		}
+
+		$this->attachments->repark( $attachment_id );
+
+		return false;
+	}
+
+	/**
 	 * Schedule the action for an attachment.
 	 *
 	 * @param int $attachment_id Attachment ID.
-	 * @return bool
+	 * @param int $delay         Seconds from now; 0 runs it as soon as a runner is free.
+	 * @param int $priority      Action Scheduler priority; lower runs first.
+	 * @return bool True when Action Scheduler accepted the action.
 	 */
-	private function schedule( $attachment_id ) {
-		return 0 !== as_enqueue_async_action( self::HOOK_PROCESS, array( 'attachment_id' => (int) $attachment_id ), self::GROUP );
+	private function schedule( $attachment_id, $delay = 0, $priority = 10 ) {
+		$args = array( 'attachment_id' => (int) $attachment_id );
+
+		try {
+			if ( $delay > 0 ) {
+				return 0 !== as_schedule_single_action( time() + $delay, self::HOOK_PROCESS, $args, self::GROUP, false, $priority );
+			}
+
+			return 0 !== as_enqueue_async_action( self::HOOK_PROCESS, $args, self::GROUP, false, $priority );
+		} catch ( Throwable $throwable ) {
+			return false;
+		}
 	}
 }

@@ -75,26 +75,40 @@ class VariantPlanner {
 	 * Plan an attachment: store the rows it should have and report what to delete.
 	 *
 	 * New variants become pending, stale or failed ones are reset to pending, and rows
-	 * of disabled formats or vanished sizes are returned for deletion.
+	 * of disabled formats or vanished sizes are returned for deletion. A variant that a
+	 * worker is converting is left alone.
 	 *
-	 * @param int $attachment_id Attachment ID.
+	 * Under a claim ($under_claim) the attempt owns the attachment row, so the planner writes no
+	 * attachment state: a skip comes back in the plan and the attempt's closing write stores it.
+	 *
+	 * @param int  $attachment_id Attachment ID.
+	 * @param bool $under_claim   Whether the caller holds the attachment's claim.
 	 * @return Plan
 	 */
-	public function plan( $attachment_id ) {
+	public function plan( $attachment_id, $under_claim = false ) {
 		$attachment_id = (int) $attachment_id;
 		$existing      = $this->variants->get_for_attachment( $attachment_id );
 		$settings      = OptimizationSettings::from_options( $this->settings, $this->capabilities );
 		$source        = $this->eligible_source( $attachment_id );
 
 		if ( is_string( $source ) ) {
-			$this->attachments->set_state( $attachment_id, AttachmentState::SKIPPED, $source );
+			if ( ! $under_claim ) {
+				$this->attachments->set_state( $attachment_id, AttachmentState::SKIPPED, $source );
+			}
 
 			return new Plan( $source, array(), $existing );
 		}
 
 		$desired = self::with_source_sizes( self::desired_variants( $source['relative_path'], $source['metadata'], $settings->enabled_formats(), $source['mime'] ) );
-		// A file that keeps crashing workers is not retried by itself; an explicit sync resets the count.
-		$retry   = $this->attachments->get_attempts( $attachment_id ) < AttachmentRepository::MAX_ATTEMPTS;
+		// A file that keeps crashing workers is not retried by itself; an explicit sync resets the count,
+		// and so does a new source file: it is another file than the one that crashed.
+		$retry = $this->attachments->get_attempts( $attachment_id ) < AttachmentRepository::MAX_ATTEMPTS;
+
+		if ( ! $retry && self::failed_source_changed( $existing, $desired ) ) {
+			$this->attachments->reset_attempts( $attachment_id );
+			$retry = true;
+		}
+
 		$actions = self::reconcile( $existing, $desired, $settings, $retry );
 
 		foreach ( $actions['insert'] as $row ) {
@@ -111,6 +125,7 @@ class VariantPlanner {
 					'source_relative_path' => $row['source_relative_path'],
 					'width'                => $row['width'],
 					'height'               => $row['height'],
+					'source_file_size'     => $row['source_file_size'],
 					'reason'               => null,
 				)
 			);
@@ -127,7 +142,7 @@ class VariantPlanner {
 		);
 
 		// With work to do the state is set by whoever queues or claims the attachment.
-		if ( empty( $pending ) && AttachmentState::SKIPPED === $this->attachments->recompute( $attachment_id ) ) {
+		if ( ! $under_claim && empty( $pending ) && AttachmentState::SKIPPED === $this->attachments->recompute( $attachment_id ) ) {
 			$this->attachments->set_state( $attachment_id, AttachmentState::NONE );
 		}
 
@@ -253,6 +268,11 @@ class VariantPlanner {
 			$row = $by_key[ $key ];
 			unset( $by_key[ $key ] );
 
+			// A worker is converting it: the next plan sees how that ended.
+			if ( VariantStatus::PROCESSING === $row['status'] ) {
+				continue;
+			}
+
 			if ( $row['source_relative_path'] !== $want['source_relative_path'] ) {
 				$result['replaced'][] = $row;
 				$result['reset'][]    = $want;
@@ -260,8 +280,8 @@ class VariantPlanner {
 			}
 
 			$retry = $retry_failed && VariantStatus::FAILED === $row['status'];
-			$stale = in_array( $row['status'], array( VariantStatus::DONE, VariantStatus::SKIPPED ), true )
-				&& ( $settings->is_stale( $row ) || self::source_changed( $row, $want ) );
+			$stale = ( in_array( $row['status'], array( VariantStatus::DONE, VariantStatus::SKIPPED ), true ) && $settings->is_stale( $row ) )
+				|| ( in_array( $row['status'], array( VariantStatus::DONE, VariantStatus::SKIPPED, VariantStatus::FAILED ), true ) && self::source_changed( $row, $want ) );
 
 			if ( $retry || $stale ) {
 				$result['reset'][] = $want;
@@ -269,9 +289,40 @@ class VariantPlanner {
 		}
 
 		// What is left has no desired counterpart: format disabled by the user or size gone.
-		$result['delete'] = array_values( $by_key );
+		$result['delete'] = array_values(
+			array_filter(
+				$by_key,
+				static function ( $row ) {
+					return VariantStatus::PROCESSING !== $row['status'];
+				}
+			)
+		);
 
 		return $result;
+	}
+
+	/**
+	 * Whether a failed row was built from a source file that has another size now.
+	 *
+	 * @param array[] $existing Stored rows.
+	 * @param array[] $desired  Output of desired_variants() with source_file_size.
+	 * @return bool
+	 */
+	private static function failed_source_changed( array $existing, array $desired ) {
+		$wanted = array();
+		foreach ( $desired as $want ) {
+			$wanted[ $want['size_name'] . '|' . $want['format'] ] = $want;
+		}
+
+		foreach ( $existing as $row ) {
+			$want = $wanted[ $row['size_name'] . '|' . $row['format'] ] ?? null;
+
+			if ( VariantStatus::FAILED === $row['status'] && null !== $want && $row['source_relative_path'] === $want['source_relative_path'] && self::source_changed( $row, $want ) ) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	/**

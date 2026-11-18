@@ -130,4 +130,120 @@ class VariantPlannerTest extends WP_UnitTestCase {
 		$this->assertSame( array(), $this->variants->get_for_attachment( $id ) );
 		$this->assertSame( AttachmentState::SKIPPED, $this->attachments->get_state( $id ) );
 	}
+
+	public function test_a_variant_a_worker_is_converting_is_never_reset_deleted_or_replaced() {
+		$id = $this->upload();
+		$this->planner->plan( $id );
+		$rows   = $this->variants->get_for_attachment( $id );
+		$moved  = $rows[0];
+		$gone   = $rows[1];
+		$this->variants->transition( $moved['id'], VariantStatus::PENDING, VariantStatus::PROCESSING );
+		$this->variants->transition( $gone['id'], VariantStatus::PENDING, VariantStatus::PROCESSING );
+		// The first row now comes from another source file (regenerated thumbnails); the second size vanished.
+		$this->variants->upsert(
+			array(
+				'attachment_id'        => $id,
+				'size_name'            => $moved['size_name'],
+				'format'               => $moved['format'],
+				'source_relative_path' => 'elsewhere/other.jpg',
+			)
+		);
+		$this->variants->upsert(
+			array(
+				'attachment_id' => $id,
+				'size_name'     => 'vanished',
+				'format'        => 'webp',
+				'status'        => VariantStatus::PROCESSING,
+			)
+		);
+
+		$plan = $this->planner->plan( $id );
+
+		$after = array_column( $this->variants->get_for_attachment( $id ), null, 'size_name' );
+		$this->assertSame( VariantStatus::PROCESSING, $after[ $moved['size_name'] ]['status'] );
+		$this->assertSame( 'elsewhere/other.jpg', $after[ $moved['size_name'] ]['source_relative_path'], 'The planner did not re-point it.' );
+		$this->assertSame( VariantStatus::PROCESSING, $after['vanished']['status'] );
+		$this->assertSame( array(), $plan->replaced() );
+		$this->assertNotContains( 'vanished', array_column( $plan->to_delete(), 'size_name' ) );
+	}
+
+	public function test_a_failed_row_whose_source_file_changed_is_retried_and_the_attempts_start_over() {
+		global $wpdb;
+
+		$id = $this->upload();
+		$this->planner->plan( $id );
+		$row = $this->variants->get_for_attachment( $id )[0];
+		$this->variants->transition( $row['id'], VariantStatus::PENDING, VariantStatus::FAILED, array( 'reason' => 'save_failed', 'source_file_size' => 1 ) );
+		$this->attachments->set_state( $id, AttachmentState::FAILED, 'max_attempts' );
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+		// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET attempts = %d WHERE attachment_id = %d", AttachmentRepository::MAX_ATTEMPTS, $id ) );
+
+		$plan = $this->planner->plan( $id );
+
+		$this->assertSame( array( $row['size_name'] ), array_column( array_filter( $plan->pending(), static function ( $pending ) use ( $row ) {
+			return $pending['size_name'] === $row['size_name'];
+		} ), 'size_name' ), 'The row of a new source goes back to pending although the count was used up.' );
+		$this->assertSame( 0, $this->attachments->get_attempts( $id ) );
+	}
+
+	public function test_a_failed_row_of_the_same_source_stays_failed_while_the_attempts_are_used_up() {
+		global $wpdb;
+
+		$id = $this->upload();
+		$this->planner->plan( $id );
+		foreach ( $this->variants->get_for_attachment( $id ) as $row ) {
+			$this->variants->transition( $row['id'], VariantStatus::PENDING, VariantStatus::FAILED, array( 'reason' => 'save_failed', 'source_file_size' => $row['source_file_size'] ) );
+		}
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+		$this->attachments->set_state( $id, AttachmentState::FAILED, 'max_attempts' );
+		// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET attempts = %d WHERE attachment_id = %d", AttachmentRepository::MAX_ATTEMPTS, $id ) );
+
+		$this->assertFalse( $this->planner->plan( $id )->has_work() );
+		$this->assertSame( AttachmentRepository::MAX_ATTEMPTS, $this->attachments->get_attempts( $id ) );
+	}
+
+	public function test_planning_under_a_claim_writes_no_attachment_state() {
+		$id = $this->upload();
+		wp_delete_file( get_attached_file( $id ) );
+		$token = $this->attachments->claim( $id, AttachmentRepository::SOURCE_SYNC );
+
+		$plan = $this->planner->plan( $id, true );
+
+		$this->assertSame( 'missing_file', $plan->skip_reason() );
+		$this->assertSame( AttachmentState::PROCESSING, $this->attachments->get_state( $id ) );
+		$this->assertTrue( $this->attachments->finish( $id, $token, AttachmentState::SKIPPED, $plan->skip_reason() ) );
+	}
+
+	public function test_a_reset_row_records_the_new_source_so_a_poison_file_stays_given_up() {
+		global $wpdb;
+
+		$id = $this->upload();
+		$this->planner->plan( $id );
+		$row = $this->variants->get_for_attachment( $id )[0];
+		$this->variants->transition( $row['id'], VariantStatus::PENDING, VariantStatus::DONE, array( 'source_file_size' => 1, 'quality' => 80 ) );
+
+		// The source file changed: the row goes back to pending and now knows the new size.
+		$this->assertTrue( $this->planner->plan( $id )->has_work() );
+		$reset = $this->variants->get_for_attachment( $id )[0];
+		$this->assertSame( VariantStatus::PENDING, $reset['status'] );
+		$this->assertGreaterThan( 1, $reset['source_file_size'] );
+
+		// The new file kills its workers three times.
+		$this->variants->transition( $reset['id'], VariantStatus::PENDING, VariantStatus::FAILED, array( 'reason' => 'max_attempts' ) );
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+		$this->attachments->set_state( $id, AttachmentState::FAILED, 'max_attempts' );
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET attempts = %d WHERE attachment_id = %d", AttachmentRepository::MAX_ATTEMPTS, $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		foreach ( $this->variants->get_for_attachment( $id ) as $other ) {
+			if ( VariantStatus::PENDING === $other['status'] ) {
+				$this->variants->transition( $other['id'], VariantStatus::PENDING, VariantStatus::FAILED, array( 'reason' => 'max_attempts', 'source_file_size' => $other['source_file_size'] ) );
+			}
+		}
+
+		$plan = $this->planner->plan( $id );
+
+		$this->assertFalse( $plan->has_work() );
+		$this->assertSame( AttachmentRepository::MAX_ATTEMPTS, $this->attachments->get_attempts( $id ), 'The attempts stay used up.' );
+	}
 }

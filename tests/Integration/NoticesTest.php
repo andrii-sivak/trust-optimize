@@ -42,7 +42,7 @@ class NoticesTest extends WP_UnitTestCase {
 
 		$database      = new DatabaseManager();
 		$this->jobs    = new BulkJobRepository( $database );
-		$this->notices = new Notices( $this->jobs, Plugin::get_instance()->bulk_producer, new CapabilityService() );
+		$this->notices = new Notices( $this->jobs, Plugin::get_instance()->bulk_producer, new CapabilityService(), $database, Plugin::get_instance()->job_health );
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
 		set_current_screen( 'plugins' );
 	}
@@ -129,11 +129,108 @@ class NoticesTest extends WP_UnitTestCase {
 		}
 	}
 
-	public function test_a_paused_job_with_another_reason_has_no_notice() {
+	public function test_a_job_the_user_paused_has_no_notice() {
 		$job = Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
 		$this->jobs->pause( $job->get_id() );
 
 		$this->assertSame( '', $this->html() );
+	}
+
+	public function test_a_job_paused_for_another_reason_names_it_shows_the_error_and_links_to_bulk_optimization() {
+		$job = Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
+		$this->jobs->pause( $job->get_id(), 'stopped' );
+		$this->jobs->record_death( $job->get_id(), 'attachment 7, death 2 of 3' );
+
+		$html = $this->html();
+
+		$this->assertStringContainsString( 'the job stopped responding', $html );
+		$this->assertStringContainsString( 'attachment 7, death 2 of 3', $html );
+		$this->assertStringContainsString( 'page=trust-optimize#bulk', $html );
+		$this->assertStringContainsString( 'Resume', $html );
+		$this->assertStringNotContainsString( 'Dismiss', $html );
+	}
+
+	public function test_a_paused_job_without_a_known_cause_says_so() {
+		$job = Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
+		$this->jobs->pause( $job->get_id(), 'unknown' );
+
+		$this->assertStringContainsString( 'The cause is not known', $this->html() );
+	}
+
+	public function test_a_job_paused_for_an_unknown_reason_shows_the_text_a_migration_kept() {
+		$job = Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
+		$this->jobs->pause( $job->get_id(), 'unknown' );
+		$this->jobs->record_death( $job->get_id(), 'Bulk job recovered from stale running state' );
+
+		$html = $this->html();
+
+		$this->assertStringContainsString( 'Last error: Bulk job recovered from stale running state', $html );
+		$this->assertStringNotContainsString( 'The cause is not known', $html );
+	}
+
+	public function test_a_failed_resume_shows_its_error_on_the_next_page_once() {
+		$job = Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
+		$this->jobs->pause( $job->get_id(), 'stopped' );
+		$low = static function () {
+			return PHP_INT_MAX;
+		};
+		add_filter( 'trust_optimize_min_free_disk_bytes', $low );
+
+		try {
+			$this->request( 'handle_resume', Notices::ACTION_RESUME );
+		} finally {
+			remove_filter( 'trust_optimize_min_free_disk_bytes', $low );
+		}
+
+		$this->assertSame( JobStatus::PAUSED, $this->jobs->get( $job->get_id() )->get_status() );
+		$this->assertStringContainsString( 'The disk is almost full', $this->html() );
+		$this->assertStringNotContainsString( 'The disk is almost full', $this->html(), 'The error is shown once.' );
+	}
+
+	public function test_the_queue_warning_comes_first_and_a_running_job_gets_no_button() {
+		Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
+		$action = as_enqueue_async_action( ConversionQueue::HOOK_PROCESS, array( 'attachment_id' => 1 ), ConversionQueue::GROUP );
+		global $wpdb;
+		$wpdb->update( $wpdb->actionscheduler_actions, array( 'status' => 'in-progress', 'last_attempt_gmt' => gmdate( 'Y-m-d H:i:s', time() - 2000 ) ), array( 'action_id' => $action ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+
+		$html = $this->html();
+
+		$this->assertStringContainsString( 'more than 15 minutes', $html );
+		$this->assertStringContainsString( 'Action Scheduler may not be running', $html );
+		$this->assertStringNotContainsString( 'Resume', $html );
+		$this->assertStringNotContainsString( 'Dismiss', $html );
+	}
+
+	public function test_attachments_held_by_a_conversion_get_instructions_and_no_button() {
+		global $wpdb;
+
+		$attachments = new TrustOptimize\Storage\AttachmentRepository( new DatabaseManager(), new TrustOptimize\Storage\VariantRepository( new DatabaseManager() ) );
+		$token       = $attachments->claim( 5001, TrustOptimize\Storage\AttachmentRepository::SOURCE_QUEUE );
+		$attachments->take_lease( 5001, $token );
+		( new TrustOptimize\Storage\VariantRepository( new DatabaseManager() ) )->upsert(
+			array(
+				'attachment_id' => 5001,
+				'size_name'     => 'original',
+				'format'        => 'webp',
+				'status'        => 'processing',
+				'relative_path' => '2026/11/held.jpg.webp',
+			)
+		);
+		$attachments->claim( 5002, TrustOptimize\Storage\AttachmentRepository::SOURCE_SYNC );
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET updated_at = %s WHERE attachment_id IN (5001, 5002)", gmdate( 'Y-m-d H:i:s', time() - 5000 ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET publishing_at = %s WHERE attachment_id = 5001", gmdate( 'Y-m-d H:i:s', time() - 5000 ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+
+		$html = $this->html();
+
+		$this->assertStringContainsString( 'The publication of the optimized files of attachment 5001 did not finish', $html );
+		$this->assertStringContainsString( '2026/11/held.jpg.webp may already be the new version while its record keeps the previous hash', $html );
+		$this->assertStringContainsString( 'target_exists_foreign', $html );
+		$this->assertStringContainsString( 'A synchronous conversion of attachment 5002', $html );
+		$this->assertStringContainsString( 'wp trust-optimize release 5001', $html );
+		$this->assertStringContainsString( 'the age of the record does not prove it', $html );
+		$this->assertStringNotContainsString( 'Resume', $html );
+		$this->assertStringNotContainsString( 'Dismiss', $html );
 	}
 
 	public function test_a_format_downgrade_is_shown_and_a_new_one_shows_again_after_dismissal() {
@@ -151,5 +248,29 @@ class NoticesTest extends WP_UnitTestCase {
 
 		$this->downgrade( '2026-10-02 10:00:00' );
 		$this->assertStringContainsString( 'AVIF files are no longer created', $this->html() );
+	}
+
+	public function test_the_queue_and_held_texts_come_before_the_paused_job() {
+		global $wpdb;
+
+		$job = Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC );
+		$this->jobs->pause( $job->get_id(), 'stopped' );
+		$action = as_enqueue_async_action( ConversionQueue::HOOK_PROCESS, array( 'attachment_id' => 1 ), ConversionQueue::GROUP );
+		$wpdb->update( $wpdb->actionscheduler_actions, array( 'status' => 'in-progress', 'last_attempt_gmt' => gmdate( 'Y-m-d H:i:s', time() - 2000 ) ), array( 'action_id' => $action ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$attachments = new TrustOptimize\Storage\AttachmentRepository( new DatabaseManager(), new TrustOptimize\Storage\VariantRepository( new DatabaseManager() ) );
+		$attachments->claim( 5003, TrustOptimize\Storage\AttachmentRepository::SOURCE_SYNC );
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET updated_at = %s WHERE attachment_id = 5003", gmdate( 'Y-m-d H:i:s', time() - 5000 ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery
+
+		$html = $this->html();
+
+		$queue  = strpos( $html, 'more than 15 minutes' );
+		$held   = strpos( $html, 'attachment 5003' );
+		$paused = strpos( $html, 'The bulk job is paused' );
+		$this->assertNotFalse( $queue );
+		$this->assertNotFalse( $held );
+		$this->assertNotFalse( $paused );
+		$this->assertLessThan( $paused, $queue );
+		$this->assertLessThan( $paused, $held );
 	}
 }

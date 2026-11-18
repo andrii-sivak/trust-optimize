@@ -61,11 +61,15 @@ class QueueRecoveryTest extends WP_UnitTestCase {
 		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
 		$source = $this->variants->get_for_attachment( $id )[0]['source_relative_path'];
 
+		// The regeneration adds a size of its own: two rows never share a target file.
+		$late_source = dirname( $source ) . '/late-' . wp_generate_uuid4() . '.jpg';
+		copy( wp_upload_dir()['basedir'] . '/' . $source, wp_upload_dir()['basedir'] . '/' . $late_source );
+
 		// While the first conversion runs, a regeneration adds another pending row.
 		$injected = false;
 		add_filter(
 			'wp_image_editors',
-			function ( $editors ) use ( &$injected, $id, $source ) {
+			function ( $editors ) use ( &$injected, $id, $late_source ) {
 				if ( ! $injected ) {
 					$injected = true;
 					$this->variants->upsert(
@@ -73,7 +77,7 @@ class QueueRecoveryTest extends WP_UnitTestCase {
 							'attachment_id'        => $id,
 							'size_name'            => 'late',
 							'format'               => 'webp',
-							'source_relative_path' => $source,
+							'source_relative_path' => $late_source,
 						)
 					);
 				}
@@ -105,7 +109,7 @@ class QueueRecoveryTest extends WP_UnitTestCase {
 	public function test_a_crashed_worker_does_not_block_queueing() {
 		$id = self::factory()->attachment->create_upload_object( DIR_TESTDATA . '/images/canola.jpg' );
 		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
-		$this->attachments->claim( $id );
+		$this->attachments->claim( $id, AttachmentRepository::SOURCE_QUEUE );
 
 		// A fresh claim blocks queueing.
 		$this->assertFalse( Plugin::get_instance()->conversion_queue->enqueue( $id ) );
@@ -116,7 +120,9 @@ class QueueRecoveryTest extends WP_UnitTestCase {
 		// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
 		$wpdb->query( $wpdb->prepare( "UPDATE `{$tables['attachments']}` SET updated_at = %s WHERE attachment_id = %d", gmdate( 'Y-m-d H:i:s', time() - 1200 ), $id ) );
 
-		$this->assertTrue( Plugin::get_instance()->conversion_queue->enqueue( $id ) );
+		// An old claim is not taken over either: the job health check ends the attempt, Action Scheduler having no action for it.
+		$this->assertFalse( Plugin::get_instance()->conversion_queue->enqueue( $id ) );
+		$this->assertSame( 1, Plugin::get_instance()->job_health->recover_attempts() );
 		$this->assertCount( 1, $this->pending_actions( $id ) );
 
 		ActionScheduler_QueueRunner::instance()->run();

@@ -9,6 +9,7 @@ namespace TrustOptimize\Database;
 
 use TrustOptimize\Domain\JobStatus;
 use TrustOptimize\Domain\PauseReason;
+use WP_Error;
 
 /**
  * Class DatabaseManager
@@ -19,7 +20,17 @@ class DatabaseManager {
 	/**
 	 * Current database version
 	 */
-	const DB_VERSION = '1.1.0';
+	const DB_VERSION = '1.2.0';
+
+	/**
+	 * Schema version that added jobs.pause_reason.
+	 */
+	const SCHEMA_PAUSE_REASON = '1.1.0';
+
+	/**
+	 * Schema version that added the attempt record, the publication lease and the Resume record.
+	 */
+	const SCHEMA_RECOVERY = '1.2.0';
 
 	/**
 	 * Register the schema version check.
@@ -41,15 +52,29 @@ class DatabaseManager {
 	}
 
 	/**
-	 * Whether this site's stored schema version is the current one.
+	 * Whether this site's stored schema version has reached a version.
 	 *
-	 * Writers that touch columns of the newest schema use it to fall back to the older shape
+	 * Writers that touch columns of a newer schema use it to fall back to the older shape
 	 * while the migration has not finished.
 	 *
+	 * @param string $version Schema version that introduced the columns.
 	 * @return bool
 	 */
-	public function is_current() {
-		return version_compare( get_option( 'trust_optimize_db_version', '0.0.0' ), self::DB_VERSION, '>=' );
+	public function has_schema( $version ) {
+		return version_compare( get_option( 'trust_optimize_db_version', '0.0.0' ), $version, '>=' );
+	}
+
+	/**
+	 * The answer of every entry point that would convert an image before the migration to 1.2.0 has finished.
+	 *
+	 * @return WP_Error
+	 */
+	public static function schema_pending_error() {
+		return new WP_Error(
+			'trust_optimize_schema_pending',
+			__( 'The database update has not finished yet, so no image is converted. It is retried automatically.', 'trust-optimize' ),
+			array( 'status' => 503 )
+		);
 	}
 
 	/**
@@ -63,11 +88,21 @@ class DatabaseManager {
 
 		$this->create_tables();
 
-		$jobs = $this->get_table_name( 'trust_optimize_jobs' );
+		$jobs        = $this->get_table_name( 'trust_optimize_jobs' );
+		$attachments = $this->get_table_name( 'trust_optimize_attachments' );
 
 		// dbDelta() reports no failure, so confirm its result.
-		if ( ! $this->column_exists( $jobs, 'pause_reason' ) ) {
-			return false;
+		$added = array(
+			array( $jobs, array( 'pause_reason', 'resumed_at', 'resume_token', 'resume_cursor_id' ) ),
+			array( $attachments, array( 'attempt_source', 'attempt_token', 'publishing_at' ) ),
+		);
+
+		foreach ( $added as $columns ) {
+			foreach ( $columns[1] as $column ) {
+				if ( ! $this->column_exists( $columns[0], $column ) ) {
+					return false;
+				}
+			}
 		}
 
 		$paused   = JobStatus::PAUSED;
@@ -154,6 +189,9 @@ class DatabaseManager {
 			total int unsigned NOT NULL DEFAULT 0,
 			settings_snapshot longtext NULL,
 			pause_reason varchar(32) NULL,
+			resumed_at datetime NULL,
+			resume_token char(32) NULL,
+			resume_cursor_id bigint(20) unsigned NULL,
 			last_error text NULL,
 			started_at datetime NULL,
 			updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -170,6 +208,9 @@ class DatabaseManager {
 			reason varchar(64) NULL,
 			attempts tinyint unsigned NOT NULL DEFAULT 0,
 			job_id bigint(20) unsigned NULL,
+			attempt_source varchar(16) NULL,
+			attempt_token char(32) NULL,
+			publishing_at datetime NULL,
 			last_error varchar(255) NULL,
 			updated_at datetime NOT NULL,
 			PRIMARY KEY  (attachment_id),

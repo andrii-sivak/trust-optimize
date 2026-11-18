@@ -8,6 +8,7 @@
 namespace TrustOptimize\Bulk;
 
 use TrustOptimize\Database\DatabaseManager;
+use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Domain\JobStatus;
 use TrustOptimize\Domain\PauseReason;
 
@@ -55,6 +56,9 @@ class BulkJobRepository {
 		'total',
 		'settings_snapshot',
 		'pause_reason',
+		'resumed_at',
+		'resume_token',
+		'resume_cursor_id',
 		'last_error',
 		'started_at',
 		'updated_at',
@@ -219,7 +223,7 @@ class BulkJobRepository {
 	}
 
 	/**
-	 * Get the active library job. Reading never changes it; abandoned jobs are recovered by recover_stale_running().
+	 * Get the active library job. Reading never changes it; abandoned jobs are stopped by JobHealth.
 	 *
 	 * @return BulkJob|null
 	 */
@@ -268,38 +272,122 @@ class BulkJobRepository {
 	/**
 	 * Mark an unfinished job as running; a finished job is never revived.
 	 *
-	 * @param int $job_id Job ID.
+	 * Continuing a paused job records the Resume: a new token, the time and the cursor at that moment, and
+	 * clears the pause reason and the last error. Nothing is written for a job that already runs. The
+	 * columns of the Resume belong to schema 1.2.0; callers answer "schema pending" before they get here.
+	 *
+	 * @param int    $job_id       Job ID.
+	 * @param string $resume_token Token that identifies this Resume to revert_resume().
 	 * @return bool True when the job is running now.
 	 */
-	public function mark_running( $job_id ) {
+	public function mark_running( $job_id, $resume_token = '' ) {
 		global $wpdb;
 
-		$now   = current_time( 'mysql', true );
-		$clear = $this->db_manager->is_current() ? ', pause_reason = NULL' : '';
+		$now = current_time( 'mysql', true );
 
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared
-		$changed = $wpdb->query(
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery
+		$resumed = $wpdb->query(
 			$wpdb->prepare(
-				'UPDATE %i SET status = %s, started_at = COALESCE(started_at, %s), updated_at = %s' . $clear . ' WHERE id = %d AND status IN (%s, %s, %s)',
+				'UPDATE %i SET status = %s, started_at = COALESCE(started_at, %s), updated_at = %s, pause_reason = NULL, last_error = NULL, resumed_at = %s, resume_token = %s, resume_cursor_id = cursor_id WHERE id = %d AND status = %s',
+				$this->get_table_name(),
+				JobStatus::RUNNING,
+				$now,
+				$now,
+				$now,
+				$resume_token,
+				(int) $job_id,
+				JobStatus::PAUSED
+			)
+		);
+
+		$started = $wpdb->query(
+			$wpdb->prepare(
+				'UPDATE %i SET status = %s, started_at = COALESCE(started_at, %s), updated_at = %s WHERE id = %d AND status = %s',
 				$this->get_table_name(),
 				JobStatus::RUNNING,
 				$now,
 				$now,
 				(int) $job_id,
-				JobStatus::PENDING,
-				JobStatus::RUNNING,
-				JobStatus::PAUSED
+				JobStatus::PENDING
 			)
 		);
 		// phpcs:enable
 
-		if ( $changed ) {
+		if ( $resumed || $started ) {
 			return true;
 		}
 
 		$job = $this->get( $job_id );
 
 		return null !== $job && JobStatus::RUNNING === $job->get_status();
+	}
+
+	/**
+	 * Undo a Resume whose producer could not be scheduled (compare-and-set on that Resume).
+	 *
+	 * The job goes back to "paused" with what it showed before. A death that was recorded meanwhile keeps its
+	 * text: the previous last error only fills an empty one. It misses when a Pause or another Resume came first.
+	 *
+	 * @param int    $job_id   Job ID.
+	 * @param string $token    Token the Resume was made with.
+	 * @param array  $previous The job as it was before the Resume: pause_reason, last_error and resumed_at.
+	 * @return bool True when this call restored the pause.
+	 */
+	public function revert_resume( $job_id, $token, array $previous ) {
+		global $wpdb;
+
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery
+		return 1 === (int) $wpdb->query(
+			$wpdb->prepare(
+				"UPDATE %i SET status = %s, pause_reason = NULLIF( %s, '' ), resumed_at = NULLIF( %s, '' ), last_error = COALESCE( last_error, NULLIF( %s, '' ) ), updated_at = %s WHERE id = %d AND status = %s AND resume_token = %s",
+				$this->get_table_name(),
+				JobStatus::PAUSED,
+				(string) ( $previous['pause_reason'] ?? '' ),
+				(string) ( $previous['resumed_at'] ?? '' ),
+				(string) ( $previous['last_error'] ?? '' ),
+				current_time( 'mysql', true ),
+				(int) $job_id,
+				JobStatus::RUNNING,
+				$token
+			)
+		);
+		// phpcs:enable
+	}
+
+	/**
+	 * Whether the job made progress since its last Resume.
+	 *
+	 * Derived from data that only real work writes. A sync job has progress when one of its attachments
+	 * ended a worker attempt (optimized, partial, skipped, or failed other than by running out of attempts)
+	 * after the Resume; the other types when the cursor moved. The producer waiting (touch()) is never progress.
+	 *
+	 * @param BulkJob $job Job that has been resumed.
+	 * @return bool
+	 */
+	public function has_progress_since_resume( BulkJob $job ) {
+		global $wpdb;
+
+		$data = $job->to_array();
+
+		if ( BulkJob::TYPE_SYNC !== $job->get_type() ) {
+			return $job->get_cursor_id() > (int) ( $data['resume_cursor_id'] ?? 0 );
+		}
+
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery
+		return (bool) $wpdb->get_var(
+			$wpdb->prepare(
+				'SELECT 1 FROM %i WHERE job_id = %d AND updated_at > %s AND ( state IN (%s, %s, %s) OR ( state = %s AND ( reason IS NULL OR reason <> %s ) ) ) LIMIT 1',
+				$this->db_manager->get_table_name( 'trust_optimize_attachments' ),
+				$job->get_id(),
+				(string) ( $data['resumed_at'] ?? '' ),
+				AttachmentState::OPTIMIZED,
+				AttachmentState::PARTIAL,
+				AttachmentState::SKIPPED,
+				AttachmentState::FAILED,
+				'max_attempts'
+			)
+		);
+		// phpcs:enable
 	}
 
 	/**
@@ -324,7 +412,7 @@ class BulkJobRepository {
 	 * @return array
 	 */
 	private function pause_data( $reason, $message = null ) {
-		if ( $this->db_manager->is_current() ) {
+		if ( $this->db_manager->has_schema( DatabaseManager::SCHEMA_PAUSE_REASON ) ) {
 			return array(
 				'status'       => JobStatus::PAUSED,
 				'pause_reason' => $reason,
@@ -349,7 +437,7 @@ class BulkJobRepository {
 	public function pause_unfinished( $reason ) {
 		global $wpdb;
 
-		$column = $this->db_manager->is_current() ? 'pause_reason' : 'last_error';
+		$column = $this->db_manager->has_schema( DatabaseManager::SCHEMA_PAUSE_REASON ) ? 'pause_reason' : 'last_error';
 
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery
 		return (int) $wpdb->query(
@@ -425,6 +513,30 @@ class BulkJobRepository {
 	}
 
 	/**
+	 * Remember that a worker of the job died, in place of what the job's last error said before.
+	 *
+	 * Neither appends nor touches updated_at: a death is no sign that the job itself is alive.
+	 *
+	 * @param int    $job_id  Job ID.
+	 * @param string $message Text for last_error.
+	 * @return bool True when an unfinished job took the message.
+	 */
+	public function record_death( $job_id, $message ) {
+		global $wpdb;
+
+		$statuses = JobStatus::active();
+
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery
+		return 1 === (int) $wpdb->query(
+			$wpdb->prepare(
+				'UPDATE %i SET last_error = %s WHERE id = %d AND status IN (' . implode( ', ', array_fill( 0, count( $statuses ), '%s' ) ) . ')',
+				array_merge( array( $this->get_table_name(), $message, (int) $job_id ), $statuses )
+			)
+		);
+		// phpcs:enable
+	}
+
+	/**
 	 * Merge values into one section of the stored snapshot (the inventory result).
 	 *
 	 * @param int    $job_id Job ID.
@@ -446,7 +558,7 @@ class BulkJobRepository {
 	}
 
 	/**
-	 * Find stale running jobs.
+	 * Find running jobs that have been silent for longer than a threshold.
 	 *
 	 * @param int $stale_after_seconds Stale threshold in seconds.
 	 * @return array
@@ -473,53 +585,40 @@ class BulkJobRepository {
 	}
 
 	/**
-	 * Recover stale running jobs so they can be resumed manually.
+	 * Move a running job whose producer vanished to "paused" so it can be resumed manually.
 	 *
-	 * Stale jobs are moved to paused instead of pending to avoid starting work
-	 * unexpectedly on admin/status requests.
+	 * Stopped jobs are paused instead of pending to avoid starting work unexpectedly on admin/status requests.
 	 *
-	 * @param int|null $stale_after_seconds Stale threshold in seconds.
-	 * @return int Number of recovered jobs.
+	 * @param BulkJob $job                 Job that has been silent for too long.
+	 * @param int     $stale_after_seconds Threshold that made it stale, in seconds.
+	 * @return bool True when this call stopped the job.
 	 */
-	public function recover_stale_running( $stale_after_seconds = null ) {
-		$stale_after_seconds = null === $stale_after_seconds ? $this->get_stale_after_seconds() : (int) $stale_after_seconds;
-		$recovered           = 0;
+	public function stop( BulkJob $job, $stale_after_seconds ) {
+		$message = null;
 
-		foreach ( $this->find_stale_running( $stale_after_seconds ) as $job ) {
-			$message = null;
+		// On the old schema the reason is the last error; the pause_reason column makes that text unnecessary.
+		if ( ! $this->db_manager->has_schema( DatabaseManager::SCHEMA_PAUSE_REASON ) ) {
+			$message = sprintf(
+				'Bulk job recovered from stale running state after %d seconds of inactivity. Resume is required.',
+				$stale_after_seconds
+			);
 
-			// On the old schema the reason is the last error; the pause_reason column makes that text unnecessary.
-			if ( ! $this->db_manager->is_current() ) {
-				$message = sprintf(
-					'Bulk job recovered from stale running state after %d seconds of inactivity. Resume is required.',
-					$stale_after_seconds
-				);
+			$previous = $job->to_array()['last_error'] ?? '';
 
-				$previous = $job->to_array()['last_error'] ?? '';
-
-				if ( ! empty( $previous ) ) {
-					$message = $previous . "\n" . $message;
-				}
-			}
-
-			if ( $this->transition(
-				$job->get_id(),
-				array( JobStatus::RUNNING ),
-				$this->pause_data( PauseReason::STOPPED, $message )
-			) ) {
-				++$recovered;
+			if ( ! empty( $previous ) ) {
+				$message = $previous . "\n" . $message;
 			}
 		}
 
-		return $recovered;
+		return $this->transition( $job->get_id(), array( JobStatus::RUNNING ), $this->pause_data( PauseReason::STOPPED, $message ) );
 	}
 
 	/**
-	 * Get stale running job threshold.
+	 * Seconds of silence after which a running job counts as stale.
 	 *
-	 * @return int Threshold in seconds.
+	 * @return int
 	 */
-	private function get_stale_after_seconds() {
+	public function stale_after_seconds() {
 		$threshold = (int) apply_filters( 'trust_optimize_bulk_stale_after_seconds', 15 * MINUTE_IN_SECONDS );
 
 		return max( MINUTE_IN_SECONDS, $threshold );
@@ -583,7 +682,7 @@ class BulkJobRepository {
 		$data['updated_at'] = current_time( 'mysql', true );
 		$data               = array_intersect_key( $data, array_flip( self::UPDATABLE_COLUMNS ) );
 
-		if ( ! $this->db_manager->is_current() ) {
+		if ( ! $this->db_manager->has_schema( DatabaseManager::SCHEMA_PAUSE_REASON ) ) {
 			unset( $data['pause_reason'] );
 		}
 

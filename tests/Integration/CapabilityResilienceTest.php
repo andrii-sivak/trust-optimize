@@ -194,10 +194,11 @@ class CapabilityResilienceTest extends WP_UnitTestCase {
 			}
 		);
 
-		$settings = new TrustOptimize\Settings\OptimizationSettings( array( 'zzz' ), array( 'zzz' ), array( 'zzz' => 80 ) );
+		$settings    = new TrustOptimize\Settings\OptimizationSettings( array( 'zzz' ), array( 'zzz' ), array( 'zzz' => 80 ) );
+		$attachments = new AttachmentRepository( new DatabaseManager(), $this->variants );
 		$row      = $this->variants->get_for_attachment( 4242 )[0];
-		$converter = new TrustOptimize\Features\Optimization\ImageConverter( $this->variants, new TrustOptimize\Files\AtomicImageWriter( $this->variants, new TrustOptimize\Files\FileOwnership( $this->variants ) ), new CapabilityService() );
-		$result    = $converter->convert( $row, $settings );
+		$converter = new TrustOptimize\Features\Optimization\ImageConverter( $this->variants, new TrustOptimize\Files\AtomicImageWriter( new TrustOptimize\Files\FileOwnership( $this->variants ) ), new CapabilityService(), $attachments );
+		$result    = $converter->convert( $row, $settings, $attachments->claim( 4242, AttachmentRepository::SOURCE_SYNC ) );
 
 		$this->assertTrue( $result->is_failed() );
 		$this->assertSame( 'no_editor', $result->get_message() );

@@ -9,7 +9,7 @@ status: final
 created: '2026-11-16'
 updated: '2026-11-17'
 binds: ['#19', '#21', '#22', '#26', '#28', '#29', '#30', '#31', '#32', '#34', '#35']
-sources: ['code at 0943f8c', 'AGENTS.md', 'readme.txt', 'GitHub issues #1-#40', 'owner decisions 2026-11-17']
+sources: ['code at 0943f8c', 'AGENTS.md', 'readme.txt', 'GitHub issues #1-#40', 'owner decisions 2026-11-17', 'owner decisions for #30 2026-11-17 (AD-7, AD-9, AD-10)']
 companions: []
 ---
 
@@ -110,18 +110,26 @@ flowchart TD
 ### AD-7 — Pause parks the job's work; only an explicit Resume continues
 
 - **Binds:** bulk, gate (AD-11), lifecycle, maintenance, job-health check (AD-9), admin, REST, WP-CLI, #30, #35
-- **Prevents:** paused jobs that keep converting; deferral loops while paused; work lost or duplicated by Resume; automatic resumes that loop on a poison file; a pause reason lost in `last_error`.
+- **Prevents:** paused jobs that keep converting; deferral loops while paused; work lost or duplicated by Resume; automatic resumes that loop on a poison file; a pause reason lost in `last_error`; a Resume refused on a guess about the queue.
 - **Rule:**
   - **Reason.** A paused job stores `pause_reason` apart from `last_error`. Values: `user`, `deactivated`, `low_disk_space`, `stopped` (dead worker or stale job), `unknown` (migrated pause whose reason cannot be determined).
   - **Parking.** When the gate meets an attachment whose job is paused, the action ends without converting and without scheduling. The attachment moves by CAS to state `none` with reason `paused`, keeping its `job_id`. A conversion already running may finish.
+    - **Before the gate exists (#26), `process()` parks.** The claim CAS itself refuses an attachment whose job is paused, so a Pause committed before the claim always wins. There is no separate check before the claim.
+    - That applies to every pending action of the job, recovered ones included.
     - A parked attachment is neither a deferral nor a death.
     - It counts as unfinished work of its job.
     - Maintenance and Restore never queue it.
     - Deactivation parks the same way, with reason `deactivated` (AD-16).
     - One repository method defines the parked set.
+    - A job never completes while its parked set is not empty.
   - **Resume** (admin screen, REST `POST /bulk/resume`, `wp trust-optimize resume`) is the only way a job continues, for every reason. Nothing resumes a job automatically.
     - After Resume, every unfinished attachment of the job (parked, queued or behind the cursor) remains reachable for queueing. That holds even if a runner picks up an action at once, or some queueing calls fail. The order of the status write and the queueing is fixed in the spec.
-    - If the AS queue is still blocked, the job stays paused and the plugin says that AS must run again.
+    - A parked attachment behind the cursor is still picked up.
+    - A Resume that fails restores the job's previous `pause_reason`. It restores the previous `last_error` too, unless a death recorded a newer one in the meantime; that newer error is kept.
+    - Resume runs step 1 of the job-health check first (AD-9). Its status CAS then clears the job's `last_error`.
+    - **Queue signals do not block Resume.** When the queue signals of AD-9 are present, Resume still continues the job. It warns that the work runs only once Action Scheduler's own runner can run again.
+    - **Refusal on queue grounds** needs a confirmed block. The documented AS API cannot confirm one, so the age of actions is never grounds for refusal. The disk re-check on Resume (AD-11) stays.
+    - A Resume that fails by itself (the status write or the producer scheduling) reports that error.
   - **Outside the bulk.** Attachments that do not belong to the paused job (uploads, imports) keep converting.
 
 ### AD-8 — Job liveness is derived from data by one function
@@ -140,32 +148,92 @@ flowchart TD
     - waiting behind higher-priority actions;
     - the mere existence of an AS action.
   - **Threshold.** The public filter `trust_optimize_bulk_stale_after_seconds` is the time without progress: no new change among the job's attachments, no producer step, and no pending deferral whose next attempt is still ahead.
+  - **Recovery is not progress.** An AD-10 recovery write never counts as a change for this function.
+  - **Interim.** #34 builds this function. Until then, AD-9 step 2 uses the old job-row test, on admin page loads only; that is the one tolerated exception to "Not stale by itself".
 
 ### AD-9 — One job-health check, in the site's context
 
 - **Binds:** bulk, maintenance, admin, REST, WP-CLI, multisite, #25, #30, #34
-- **Prevents:** recovery logic scattered over hooks with different exclusions; recovery triggered by `admin_init` inside an AS async-runner request.
+- **Prevents:** recovery logic scattered over hooks with different exclusions; recovery triggered by `admin_init` inside an AS async-runner request; each consumer guessing on its own whether the queue is stuck.
 - **Rule:**
+  - **Ownership.**
+    - #30 builds the entry point and removes the unguarded `admin_init` stale recovery from `BulkProducer`.
+    - #34 replaces step 2.
+    - #26 supplies the deferral data.
   - **Callers.** One entry point is called from:
     - admin page loads, guarded by `! wp_doing_ajax() && ! wp_doing_cron()`;
     - Resume (AD-7);
     - the Maintenance action when it runs.
   - **Order.**
-    1. Handle worker deaths (AD-10).
+    1. Handle confirmed worker deaths (AD-10).
     2. Judge liveness (AD-8).
     3. Pause a stopped job with `stopped` (AD-7).
+  - **Who runs which steps.**
+    - Steps 2 and 3 run only on admin page loads. Resume and Maintenance run step 1 and never stop a job.
+    - Until the AD-8 function lands (#34), step 2 is the old test: the job's `updated_at` against `trust_optimize_bulk_stale_after_seconds`.
+    - **One stop per stoppage.** A queue stoppage that began before the job's last Resume never stops the job again. It only keeps the warning.
+    - Once AS can run tasks again, the job continues from its saved progress without another Resume.
+  - **Queue signals.** Read only through `as_get_scheduled_actions()`, with a threshold of 900 s (`AttachmentRepository::STALE_CLAIM_SECONDS`).
+    - **Stuck claim.** An action of the group `trust-optimize` is `in-progress`, or `pending` and claimed, and has not changed for more than the threshold.
+    - **No progress.** Due `pending` actions of the group have waited longer than the threshold, and no conversion action of the group reached `complete` within it. `failed` does not count, because AS 4.x stamps a timeout failure with the failure time.
+    - Never-claimed `pending` actions carry no attempt time, so the age tests on `modified` apply to claimed actions only.
+    - They are diagnostics only. They feed the notice and the Resume warning (AD-7). They never pause a job, refuse a Resume or touch a claim (AD-5).
   - **Notice.** Administrators see a notice with a link to Bulk Optimization while a job is paused for any reason except `user`: `stopped`, `low_disk_space`, `deactivated` after reactivation, `unknown`.
-    - It shows the last known error, or says plainly that the cause is unknown.
-    - When the disk is still full or the AS queue is still blocked, the notice first explains what prevents continuing.
+    - It names the `pause_reason` first. For `stopped` and `unknown` it then shows the job's `last_error` (written by death recovery, AD-10), or says plainly that the cause is unknown.
+    - When the disk is still full or a queue signal is present, the notice first explains what prevents continuing.
+    - A running job with a queue signal gets the same warning, without a Resume button.
   - **Scope.** The check works only on the current site's tables, options and queue. There is no separate night-time check.
 
 ### AD-10 — A worker death is counted once, by the claim [ADOPTED, amended]
 
-- **Binds:** storage, processing, maintenance, job-health check, queue, #30, #31
-- **Prevents:** a poison file re-queued forever; one death counted two or three times.
+- **Binds:** storage, processing, planning, optimization, lifecycle, maintenance, job-health check, queue, REST, WP-CLI, #30, #31
+- **Prevents:**
+  - a poison file re-queued forever;
+  - one death counted two or three times;
+  - a live conversion taken over while AS still holds its action;
+  - a late worker overwriting a recovery or publishing over a newer attempt.
 - **Rule:**
-  - **Counting.** `claim()` increments `attempts`; it is the only place that counts. A worker that ends normally (finished, continue, defer, parked) resets them.
-  - **Leaving `processing` after a death** is one repository CAS: `failed` with reason `max_attempts` when `attempts >= AttachmentRepository::MAX_ATTEMPTS`, otherwise back to `queued` (or parked, if its job is paused). Every recovery path uses that CAS: Maintenance, the job-health check, `mark_queued` and `claim()` when they take over a stale claim, and Resume.
+  - **Counting.** `claim()` increments `attempts`; it is the only place that counts. A worker that ends normally (finished, continue, defer, parked) resets them. A wait or a deferral is never a death.
+  - **Attempt record.** `claim()` records the attempt: who started it (an AS action or a synchronous request) and a token that identifies this claim.
+    - The record lives in columns of `trust_optimize_attachments`, added by schema 1.2.0 (AD-17).
+    - Recovery and the late-worker checks key on that record.
+  - **Confirmed death.** An attempt that AS started is dead when both hold:
+    - its attachment has been `processing` for longer than `AttachmentRepository::STALE_CLAIM_SECONDS` (900 s);
+    - AS answers that it has no `pending` or `in-progress` action for that attachment. This is one `as_get_scheduled_actions()` query covering both statuses.
+
+    No answer is not a death: AS not initialized, a failed query, or AS tables missing on a site.
+    - AS fails an action that has been running longer than its own failure period (300 s by default) without checking the worker. Past that, a live conversion is protected only by the late-worker rule below.
+    - Even then the old PHP process may still be running, so a recovery never relies on the worker being gone. Publication is guarded separately (below).
+    - **Never by age alone.** A synchronous attempt (REST, WP-CLI) and a legacy attempt without a recorded source are never recovered automatically. No age, a day included, proves them dead.
+    - While such an attachment stays `processing`, the operator sees why: what holds it, since when, and how to release it (the spec defines this).
+    - A synchronous request for an attachment that any attempt holds answers busy.
+  - **One recovery owner.**
+    - Step 1 of the job-health check (AD-9) recovers dead attempts, whether it runs from admin page loads, Resume or Maintenance.
+    - `claim()` and `mark_queued()` never take over a `processing` attachment by age. `claim()` runs inside the attachment's own AS action, so it could never confirm a death; it answers busy.
+  - **Death CAS.** Leaving `processing` after a death is one repository CAS, keyed on the dead attempt, so it moves that attempt once:
+    - `failed` with reason `max_attempts` when `attempts >= AttachmentRepository::MAX_ATTEMPTS` (3), and the attempt's `processing` and `pending` variants become `failed` / `max_attempts`;
+    - otherwise the attempt's `processing` variants go back to `pending`, and the attachment back to `queued`, or parked if its job is paused. The recovering path then schedules the action at priority 20 (AD-4).
+  - **Only the attempt or the death CAS leaves `processing`.** The unconditional writes AD-3 allows (planner, producer, `recompute`, `set_state`) never move an attachment into or out of `processing`.
+  - **Poison file.**
+    - Every queueing CAS (`mark_queued`, `requeue`, the Lifecycle restore) refuses an attachment that is `failed` / `max_attempts` with `attempts >= MAX_ATTEMPTS`. So bulk, metadata regeneration, Maintenance and reactivation never queue it.
+    - Only two things reset the count:
+      - an explicit sync, inside its own claim, so a refused sync leaves the count intact;
+      - a replaced source file, detected as in AD-14, which planning then queues as usual.
+  - **Late worker.** Every write of an attempt is conditional on still holding it:
+    - the `attempts` reset;
+    - the attachment state writes;
+    - variant transitions out of `processing`;
+    - the publication: the final token check, the rename and the `done` write (AD-13);
+    - next-action scheduling.
+
+    A worker that finds its attempt recovered stops, and `process()` schedules nothing for it. A new attempt never resets variants that another attempt still holds.
+  - **Publication excludes revocation.**
+    - Between an attempt's final token check and its rename, no recovery can revoke that token and no other attempt can take the attachment over.
+    - When the plugin cannot establish that exclusion, it does not rename: the file at the target path stays as it is, and the variant records an error.
+    - A hash check proves ownership (AD-13); it does not close this window. The mechanism is the #30 spec's.
+  - **Job error.** When the death CAS moves an attachment of an unfinished job, `BulkJobRepository` replaces the job's `last_error` (never appends) with the attachment ID and the death count.
+    - The write does not touch the job's `updated_at`. A recovery is never progress (AD-8).
+    - It is made on the current schema only, because the old schema keeps pause reasons in `last_error`.
   - **Normal errors.** A conversion error of one file is recorded on its variant and never stops the bulk.
 
 ### AD-11 — One resource gate before every encoder call
@@ -217,13 +285,15 @@ flowchart TD
 
 ### AD-13 — The plugin touches only files it provably owns [ADOPTED, amended]
 
-- **Binds:** optimization, files, cleanup, uninstall, per-image actions, #19, #40
+- **Binds:** optimization, files, cleanup, uninstall, per-image actions, #19, #30, #40
 - **Prevents:** overwriting or deleting originals, WordPress sizes, other plugins' files or a foreign file that appeared on a reserved path.
 - **Rule:**
   - **Naming and writing.** A variant file is `<source file>.<format>` (`photo.jpg.webp`) next to its source inside uploads. It is written as a temporary file plus rename, after its row reserved `relative_path`.
+  - **The rename is part of a publication.** It never replaces a file that another attempt published. A served file only changes through a publication that still holds its attempt (AD-10).
   - **Ownership** is confirmed only when a variant row owns the `relative_path` and the file's hash equals the row's `file_hash`, which is recorded after a successful write. A reservation row plus a matching path is not confirmation.
   - **What may be changed.** The plugin changes or deletes only files with confirmed ownership. Originals, WordPress sizes and other attachments' files are never touched.
   - **Occupied target.** When the target path holds a file without confirmed ownership, the variant is skipped with `target_exists_foreign` and a message saying the file exists and is not confirmed as TrustOptimize's. Work continues. The plugin never adopts, overwrites or deletes such a file, in any action.
+    - Until #19, the writer records this outcome as `failed` / `target_exists_foreign` rather than `skipped`. The file is kept either way, and the attempt ends normally, not as a death.
   - **Deletion.** A file shared by several rows is deleted by its last owner. Every deletion is verified on the filesystem; a row whose file could not be deleted is kept as `failed`.
 
 ### AD-14 — Variant storage, staleness and delivery during re-optimization [ADOPTED, amended]
@@ -379,7 +449,11 @@ Where the diagnostics writer (AD-18) lives is decided in the #26 spec.
 - **Pace algorithm, signals, intervals and bounds; memory coefficients per format and encoder.** Calibration inside AD-11, owned by #26 (pace) and #32 (coefficients).
 - **Mechanism of the one-at-a-time slot** (lease or lock and its expiry). Owned by the #26 spec; the rule is fixed in AD-11.
 - **Where deferral data lives (attachment or variant), its columns, and the deferral limit.** Owned by the #26 spec; AD-8 and AD-11 fix what must be visible and through what.
-- **Telling a blocked AS queue from a slow one** on Resume. Owned by the #30 spec.
+- **A confirmed AS block as grounds to refuse Resume.** The documented AS API cannot show one, so the queue signals of AD-9 stay diagnostic. Revisit with the AS upgrade (#1), or when AS exposes its runner state.
+- **Column names and types of the attempt record, how a dead synchronous attempt is recovered, and the bound on step-1 work per admin page load.** Owned by the #30 spec, within AD-10, AD-9 and AD-17.
+- **One-at-a-time slot vs attempt record.** The #26 spec says whether the slot of AD-11 reuses the attempt record of AD-10 or sits beside it; it never replaces the late-worker conditions.
+- **How the check knows the job's last Resume and that a stoppage began before it.** Owned by the #30 spec, within AD-9.
+- **Whether Maintenance or Resume may also stop a job** once the AD-8 function exists. Decided by the owner with #34, as an amendment of AD-9.
 - **"Pausing" status while a running conversion finishes, and Cancel of queued attachments.** Owned by #35; Pause behavior is fixed in AD-7.
 - **Location and file mechanism of diagnostics.** Owned by the #26 spec, within AD-18.
 - **Site traversal order and limits on large networks.** Activation and deactivation in #28, uninstall in #29, within AD-15.

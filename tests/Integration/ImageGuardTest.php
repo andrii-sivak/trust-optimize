@@ -31,7 +31,7 @@ class Stubborn_Converter extends ImageConverter {
 	 */
 	public $calls = 0;
 
-	public function convert( array $variant_row, TrustOptimize\Settings\OptimizationSettings $settings ) {
+	public function convert( array $variant_row, TrustOptimize\Settings\OptimizationSettings $settings, $token ) {
 		if ( ++$this->calls > 20 ) {
 			throw new RuntimeException( 'The same row was tried again and again.' );
 		}
@@ -79,17 +79,23 @@ class ImageGuardTest extends WP_UnitTestCase {
 		return $id;
 	}
 
+	/**
+	 * Workers that claim the attachment and die, one after the other.
+	 *
+	 * @param int $id    Attachment ID.
+	 * @param int $times Number of dead workers.
+	 */
 	private function claim_times( $id, $times ) {
-		for ( $i = 0; $i < $times; $i++ ) {
-			global $wpdb;
-			$tables = ( new DatabaseManager() )->get_plugin_table_names();
-			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
-			$wpdb->query( $wpdb->prepare( "UPDATE `{$tables['attachments']}` SET state = 'none' WHERE attachment_id = %d", $id ) );
-			$this->attachments->claim( $id );
-		}
+		global $wpdb;
 
-		// The last worker died: the claim is long gone.
-		$this->attachments->set_state( $id, AttachmentState::NONE );
+		$tables = ( new DatabaseManager() )->get_plugin_table_names();
+
+		for ( $i = 0; $i < $times; $i++ ) {
+			$this->attachments->claim( $id, AttachmentRepository::SOURCE_QUEUE );
+			// The worker died and its attempt was ended without touching the count.
+			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+			$wpdb->query( $wpdb->prepare( "UPDATE `{$tables['attachments']}` SET state = 'none', attempt_source = NULL, attempt_token = NULL WHERE attachment_id = %d", $id ) );
+		}
 	}
 
 	public function test_an_image_with_too_many_pixels_is_skipped_by_its_metadata() {
@@ -182,8 +188,8 @@ class ImageGuardTest extends WP_UnitTestCase {
 		Plugin::get_instance()->planner->plan( $id );
 
 		$plugin    = Plugin::get_instance();
-		$converter = new Stubborn_Converter( $this->variants, new AtomicImageWriter( $this->variants, new FileOwnership( $this->variants ) ), new CapabilityService() );
-		$processor = new AttachmentProcessor( $this->attachments, $this->variants, $converter, $plugin->planner, $plugin->cleanup, new TrustOptimize\Admin\Settings(), new CapabilityService() );
+		$converter = new Stubborn_Converter( $this->variants, new AtomicImageWriter( new FileOwnership( $this->variants ) ), new CapabilityService(), $this->attachments );
+		$processor = new AttachmentProcessor( $this->attachments, $this->variants, $converter, $plugin->planner, $plugin->cleanup, new TrustOptimize\Admin\Settings(), new CapabilityService(), new DatabaseManager() );
 
 		$processor->run( $id, INF );
 

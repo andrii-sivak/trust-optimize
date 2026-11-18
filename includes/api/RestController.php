@@ -13,7 +13,9 @@ use WP_Error;
 use TrustOptimize\Bulk\BulkJob;
 use TrustOptimize\Bulk\BulkJobRepository;
 use TrustOptimize\Bulk\BulkProducer;
+use TrustOptimize\Bulk\JobHealth;
 use TrustOptimize\Bulk\JobProgress;
+use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Processing\AttachmentProcessor;
 use TrustOptimize\Service\ImageCleanupService;
 use TrustOptimize\Storage\AttachmentRepository;
@@ -85,6 +87,13 @@ class RestController extends WP_REST_Controller {
 	private $producer;
 
 	/**
+	 * Job health.
+	 *
+	 * @var JobHealth
+	 */
+	private $health;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param AttachmentRepository $attachments Attachment repository.
@@ -93,14 +102,16 @@ class RestController extends WP_REST_Controller {
 	 * @param BulkJobRepository    $jobs        Bulk job repository.
 	 * @param JobProgress          $progress    Bulk job progress.
 	 * @param BulkProducer         $producer    Bulk job producer.
+	 * @param JobHealth            $health      Job health.
 	 */
-	public function __construct( AttachmentRepository $attachments, AttachmentProcessor $processor, ImageCleanupService $cleanup, BulkJobRepository $jobs, JobProgress $progress, BulkProducer $producer ) {
+	public function __construct( AttachmentRepository $attachments, AttachmentProcessor $processor, ImageCleanupService $cleanup, BulkJobRepository $jobs, JobProgress $progress, BulkProducer $producer, JobHealth $health ) {
 		$this->attachments = $attachments;
 		$this->processor   = $processor;
 		$this->cleanup     = $cleanup;
 		$this->jobs        = $jobs;
 		$this->progress    = $progress;
 		$this->producer    = $producer;
+		$this->health      = $health;
 	}
 
 	/**
@@ -328,7 +339,7 @@ class RestController extends WP_REST_Controller {
 
 		return rest_ensure_response(
 			array(
-				'job' => $job ? $this->progress->describe( $job ) : null,
+				'job' => $job ? $this->describe_job( $job ) : null,
 			)
 		);
 	}
@@ -383,6 +394,27 @@ class RestController extends WP_REST_Controller {
 
 		$result = $this->processor->sync( $attachment_id );
 
+		if ( $result->is_failed() && AttachmentProcessor::SCHEMA_PENDING === $result->get_message() ) {
+			return DatabaseManager::schema_pending_error();
+		}
+
+		if ( $result->is_skipped() && AttachmentProcessor::BUSY === $result->get_message() ) {
+			return new WP_Error(
+				'trust_optimize_attachment_busy',
+				sprintf(
+					/* translators: 1: who converts it (queue, sync or empty), 2: since when, UTC. */
+					__( 'A conversion of this attachment is running (source: %1$s, since %2$s UTC).', 'trust-optimize' ),
+					(string) ( $result->get_data()['source'] ?? 'legacy' ),
+					(string) ( $result->get_data()['since'] ?? '' )
+				),
+				array(
+					'status' => 409,
+					'source' => $result->get_data()['source'] ?? null,
+					'since'  => $result->get_data()['since'] ?? null,
+				)
+			);
+		}
+
 		return rest_ensure_response( $result->to_array() );
 	}
 
@@ -419,6 +451,10 @@ class RestController extends WP_REST_Controller {
 	private function create_and_start_bulk_job( $type, $request ) {
 		$job = $this->producer->launch( $type );
 
+		if ( is_wp_error( $job ) ) {
+			return $job;
+		}
+
 		if ( ! $job ) {
 			return new WP_Error(
 				'trust_optimize_active_bulk_job_exists',
@@ -429,7 +465,7 @@ class RestController extends WP_REST_Controller {
 
 		return rest_ensure_response(
 			array(
-				'job' => $this->progress->describe( $job ),
+				'job' => $this->describe_job( $job ),
 			)
 		);
 	}
@@ -452,13 +488,27 @@ class RestController extends WP_REST_Controller {
 			return rest_ensure_response( array( 'job' => null ) );
 		}
 
-		$this->producer->$action( $job->get_id() );
+		$outcome = $this->producer->$action( $job->get_id() );
+
+		if ( is_wp_error( $outcome ) ) {
+			return $outcome;
+		}
 
 		return rest_ensure_response(
 			array(
-				'job' => $this->progress->describe( $this->jobs->get( $job->get_id() ) ),
+				'job' => $this->describe_job( $this->jobs->get( $job->get_id() ) ),
 			)
 		);
+	}
+
+	/**
+	 * A job with its progress and what looks wrong with the queue.
+	 *
+	 * @param BulkJob $job Job.
+	 * @return array
+	 */
+	private function describe_job( BulkJob $job ) {
+		return array_merge( $this->progress->describe( $job ), array( 'queue_signals' => $this->health->queue_signals() ) );
 	}
 
 	/**

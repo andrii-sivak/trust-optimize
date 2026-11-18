@@ -6,6 +6,7 @@
  */
 
 use TrustOptimize\Bulk\BulkJobRepository;
+use TrustOptimize\Core\Plugin;
 use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Domain\JobStatus;
 
@@ -115,7 +116,7 @@ class BulkJobRepositoryTest extends WP_UnitTestCase {
 
 		$this->set_offset( 3 );
 
-		$this->assertSame( 0, $this->jobs->recover_stale_running() );
+		$this->assertSame( 0, Plugin::get_instance()->job_health->stop_stale_jobs() );
 		$this->assertSame( JobStatus::RUNNING, $this->row( $job->get_id() )['status'] );
 	}
 
@@ -125,7 +126,7 @@ class BulkJobRepositoryTest extends WP_UnitTestCase {
 		$this->jobs->mark_running( $job->get_id() );
 		$this->age( $job->get_id(), 16 * MINUTE_IN_SECONDS );
 
-		$this->assertSame( 1, $this->jobs->recover_stale_running() );
+		$this->assertSame( 1, Plugin::get_instance()->job_health->stop_stale_jobs() );
 		$row = $this->row( $job->get_id() );
 		$this->assertSame( JobStatus::PAUSED, $row['status'] );
 		$this->assertSame( 'stopped', $row['pause_reason'] );
@@ -137,7 +138,7 @@ class BulkJobRepositoryTest extends WP_UnitTestCase {
 		$job = $this->jobs->create( 'library' );
 		$this->jobs->mark_running( $job->get_id() );
 
-		$this->assertSame( 0, $this->jobs->recover_stale_running() );
+		$this->assertSame( 0, Plugin::get_instance()->job_health->stop_stale_jobs() );
 		$this->assertSame( JobStatus::RUNNING, $this->row( $job->get_id() )['status'] );
 	}
 
@@ -205,7 +206,7 @@ class BulkJobRepositoryTest extends WP_UnitTestCase {
 		$wpdb->update( $wpdb->prefix . 'trust_optimize_jobs', array( 'last_error' => $error ), array( 'id' => $id ) );
 		$this->age( $id, 16 * MINUTE_IN_SECONDS );
 
-		$this->assertSame( 1, $this->jobs->recover_stale_running() );
+		$this->assertSame( 1, Plugin::get_instance()->job_health->stop_stale_jobs() );
 
 		$row = $this->row( $id );
 		$this->assertSame( JobStatus::PAUSED, $row['status'] );

@@ -136,10 +136,14 @@
 
 			wp.apiFetch(request)
 				.then(this.renderBulkStatus.bind(this))
-				.catch(this.renderError.bind(this));
+				.catch(function(error) {
+					// The error stays in the status line; the buttons and counters follow what the job really is now.
+					this.renderError(error);
+					this.refreshBulkStatus(true);
+				}.bind(this));
 		},
 
-		refreshBulkStatus: function() {
+		refreshBulkStatus: function(keepStatusText) {
 			if (!(window.wp && wp.apiFetch)) {
 				return;
 			}
@@ -147,7 +151,9 @@
 			wp.apiFetch({
 				path: '/trust-optimize/v1/bulk/status'
 			})
-				.then(this.renderBulkStatus.bind(this))
+				.then(function(response) {
+					this.renderBulkStatus(response, true === keepStatusText);
+				}.bind(this))
 				.catch(this.renderError.bind(this));
 		},
 
@@ -189,11 +195,14 @@
 			return this.format(i18n.progress, [label, progress + '%', job.processed, job.total]);
 		},
 
-		renderBulkStatus: function(response) {
+		renderBulkStatus: function(response, keepStatusText) {
 			var job = response && response.job ? response.job : null;
 
 			if (!job) {
-				this.setStatusText(this.text('idle'));
+				if (!keepStatusText) {
+					this.setStatusText(this.text('idle'));
+				}
+
 				this.updateProgress(0);
 				this.updateCounters(null);
 				this.updateControls(null);
@@ -206,7 +215,10 @@
 			var progress = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
 			var finishing = 'running' === job.status && 0 === parseInt(job.in_flight, 10) && processed > 0 && processed >= total;
 
-			this.setStatusText(this.describeJob(job, progress, finishing));
+			if (!keepStatusText) {
+				this.setStatusText(this.describeJob(job, progress, finishing));
+			}
+
 			this.updateProgress(progress);
 			this.updateCounters(job);
 			this.updateControls(job);
@@ -255,6 +267,19 @@
 
 			$table.find('.trust-optimize-pause-reason').prop('hidden', !reason);
 			$table.find('[data-field="pause_reason"]').text(reason);
+
+			var signals = Array.isArray(job.queue_signals) ? job.queue_signals : [];
+			var signalTexts = (window.trustOptimizeAdmin.i18n || {}).queueSignals || {};
+			var explanation = $.map(signals, function(signal) {
+				return signalTexts[signal] || null;
+			});
+
+			if (explanation.length) {
+				explanation.push(signalTexts.hint || '');
+			}
+
+			$table.find('.trust-optimize-queue-signals').prop('hidden', !explanation.length);
+			$table.find('[data-field="queue_signals"]').text(explanation.join(' '));
 
 			$table.find('.trust-optimize-last-error').prop('hidden', !job.last_error);
 			$table.find('[data-field="last_error"]').text(job.last_error || '');
