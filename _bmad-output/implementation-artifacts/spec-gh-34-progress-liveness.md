@@ -2,7 +2,7 @@
 title: 'Job liveness from attempt evidence, slow attempts, AD-5 priorities and the claim poison guard (#34)'
 type: 'bugfix'
 created: '2026-11-18'
-status: 'in-review'
+status: 'done'
 route: ''
 review_loop_iteration: 1
 context:
@@ -262,6 +262,14 @@ Rejected:
   - **Mutation check.** With evidence disabled, the three new liveness tests fail; with it restored, everything passes.
   - **Leaks.** No pending `trust-optimize` actions were left in the test database after the full run.
 
+- Stand checks (2026-11-18, build of 7d84bb9 plus the review fixes; a temporary mu-plugin set the threshold to 120 s and slowed each variant inside AS actions; queue run only by the `cron` container):
+  - **Priorities.** The producer and Maintenance ran at 10, conversions at 20. Pending conversions peaked at 27, so the backlog limit was not reached on 28 attachments.
+  - **No false stop.** Job #17 completed. Its row aged to 522 s against the 120 s threshold while claims and variants stayed fresh, and 34 admin-load probes kept it running. The producer did not step often despite priority 10: `wp action-scheduler run` claims up to 100 actions at once, and the claimed batch ran about 9 minutes (the "a batch already claimed runs on" caveat of AD-5). Attempt evidence is what kept the job alive.
+  - **Dead worker at a low threshold.** Job #19: `docker stop -t 0` of `cron` during a conversion. The job stayed running until the claim was 869 s old, and was stopped at 925 s, with signals `stuck_claim,no_progress`. Then:
+    - after `cron` started, AS failed the action itself, step 1 recovered the attempt once (parked, `attempts` 1, "attachment 245, death 1 of 3"), and the rest of the job parked;
+    - Resume (no warning) completed the job with all 28 files optimized, including 245 (`attempts` 0).
+  - **EXPLAIN.** `jobs` uses `status_updated`; attachments are read through `job_state` (`index_subquery`); variants through `attachment_size_format`. The cost scales with the job's attachments and is not measured at scale (deferred).
+  - **Leftover temporary file.** The killed worker left one `.tmp-*` file (#11); it was deleted by hand.
 ## Spec Change Log
 
 - **Review 1, decision 1 (owner, 2026-11-18).** Finding: `attempt_evidence()` required `a.updated_at >= T` before it looked at variants. A sync attempt has no budget, and a raised `trust_optimize_worker_time_budget` lets an attempt outlive its claim, so a long attempt that kept moving variants left no evidence and its job was stopped mid-work. Amended:
