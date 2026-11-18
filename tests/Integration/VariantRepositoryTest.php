@@ -58,7 +58,7 @@ class VariantRepositoryTest extends WP_UnitTestCase {
 	}
 
 	public function test_upserting_an_existing_row_without_a_status_keeps_its_timestamp() {
-		$id = $this->repo->upsert( $this->variant( array( 'status' => VariantStatus::DONE ) ) );
+		$id  = $this->repo->upsert( $this->variant( array( 'status' => VariantStatus::DONE ) ) );
 		$old = $this->age( $id );
 
 		$this->repo->upsert( $this->variant() );
@@ -69,12 +69,14 @@ class VariantRepositoryTest extends WP_UnitTestCase {
 		$this->assertSame( VariantStatus::DONE, $this->repo->get_for_attachment( 501 )[0]['status'] );
 	}
 
-	public function test_upserting_a_status_refreshes_the_timestamp() {
-		$id = $this->repo->upsert( $this->variant( array( 'status' => VariantStatus::DONE ) ) );
+	public function test_only_a_reset_to_pending_refreshes_the_timestamp() {
+		$id  = $this->repo->upsert( $this->variant( array( 'status' => VariantStatus::DONE ) ) );
 		$old = $this->age( $id );
 
-		$this->repo->upsert( $this->variant( array( 'status' => VariantStatus::PENDING ) ) );
+		$this->repo->upsert( $this->variant( array( 'status' => VariantStatus::DONE ) ) );
+		$this->assertSame( $old, $this->repo->get_for_attachment( 501 )[0]['updated_at'], 'A worker status written by upsert is not a worker transition.' );
 
+		$this->repo->upsert( $this->variant( array( 'status' => VariantStatus::PENDING ) ) );
 		$this->assertNotSame( $old, $this->repo->get_for_attachment( 501 )[0]['updated_at'] );
 	}
 

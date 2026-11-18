@@ -109,8 +109,9 @@ class VariantRepository {
 		);
 		$update        = array_intersect_key( $data, self::DEFAULTS );
 
-		// Only a status write is a transition worth a new timestamp: a planner insert that races and finds the row must not look like work.
-		if ( isset( $update['status'] ) ) {
+		// Only a reset to pending is worth a new timestamp here: worker statuses are written by transitions, and a planner
+		// insert that races and finds the row must not look like work.
+		if ( VariantStatus::PENDING === ( $update['status'] ?? null ) ) {
 			$update['updated_at'] = $now;
 		}
 

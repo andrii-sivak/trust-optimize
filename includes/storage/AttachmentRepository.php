@@ -287,10 +287,13 @@ class AttachmentRepository {
 	}
 
 	/**
-	 * Give up an attachment that used all its attempts but is not marked failed yet, together with its pending variants (compare-and-set).
+	 * Give up an attachment that used all its attempts and still waits for work, together with its open variants (compare-and-set).
 	 *
-	 * Only a row no attempt holds is closed: a processing row, or one with a token, belongs to a live attempt
-	 * and leaves through that attempt's own closing write, the death compare-and-set or a release.
+	 * Only a queued or parked row that no attempt holds is closed: a processing row, or one with a token, belongs to a
+	 * live attempt and leaves through that attempt's own closing write, the death compare-and-set or a release. A row
+	 * whose stored state is a result (optimized, partial, skipped, failed) keeps it: the count alone is no reason to
+	 * rewrite what was converted. A variant still marked processing on a row nobody holds is an orphan and is given up
+	 * with the pending ones.
 	 *
 	 * @param int $attachment_id Attachment ID.
 	 * @return bool True when this call closed the attachment.
@@ -303,24 +306,26 @@ class AttachmentRepository {
 
 		$changed = $wpdb->query(
 			$wpdb->prepare(
-				'UPDATE %i a LEFT JOIN %i v ON v.attachment_id = a.attachment_id AND v.status = %s
-				SET a.state = %s, a.reason = %s, a.last_error = %s, a.updated_at = %s,
+				'UPDATE %i a LEFT JOIN %i v ON v.attachment_id = a.attachment_id AND v.status IN ( %s, %s )
+				SET a.state = %s, a.reason = %s, a.last_error = CONCAT( %s, a.attempts, %s ), a.updated_at = %s,
 					v.status = %s, v.reason = %s, v.updated_at = %s
-				WHERE a.attachment_id = %d AND a.attempts >= %d AND a.state NOT IN ( %s, %s ) AND a.attempt_token IS NULL',
+				WHERE a.attachment_id = %d AND a.attempts >= %d AND a.state IN ( %s, %s ) AND a.attempt_token IS NULL',
 				$tables['attachments'],
 				$tables['variants'],
 				VariantStatus::PENDING,
+				VariantStatus::PROCESSING,
 				AttachmentState::FAILED,
 				'max_attempts',
-				'The worker died ' . self::MAX_ATTEMPTS . ' times on this file.',
+				'The file used all its attempts (',
+				').',
 				$now,
 				VariantStatus::FAILED,
 				'max_attempts',
 				$now,
 				(int) $attachment_id,
 				self::MAX_ATTEMPTS,
-				AttachmentState::PROCESSING,
-				AttachmentState::FAILED
+				AttachmentState::QUEUED,
+				AttachmentState::NONE
 			)
 		);
 

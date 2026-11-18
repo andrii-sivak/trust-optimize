@@ -134,6 +134,12 @@ class ConversionQueueTest extends WP_UnitTestCase {
 		$this->assertSame( array(), $this->pending_actions( $id ) );
 	}
 
+	/**
+	 * Priorities of the pending conversion actions of an attachment.
+	 *
+	 * @param int $attachment_id Attachment ID.
+	 * @return int[]
+	 */
 	private function priorities( $attachment_id ) {
 		$actions = as_get_scheduled_actions(
 			array(
@@ -228,13 +234,67 @@ class ConversionQueueTest extends WP_UnitTestCase {
 		$id = $this->upload();
 		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
 		$this->set_attempts( $id, AttachmentRepository::MAX_ATTEMPTS );
+		// An orphan left by an attempt that is gone: nobody holds the row.
+		$orphan = $this->variants->get_for_attachment( $id )[0];
+		$this->variants->transition( $orphan['id'], VariantStatus::PENDING, VariantStatus::PROCESSING );
 
 		$this->queue()->process( $id );
 
 		$row = $this->attachments->get( $id );
 		$this->assertSame( array( AttachmentState::FAILED, 'max_attempts', 3 ), array( $row['state'], $row['reason'], $row['attempts'] ) );
+		$this->assertStringContainsString( '(3)', $row['last_error'] );
 		$statuses = array_unique( array_column( $this->variants->get_for_attachment( $id ), 'status' ) );
 		$this->assertSame( array( VariantStatus::FAILED ), $statuses, 'No pending variant is left, so a bulk job can complete.' );
+		$this->assertSame( array(), $this->pending_actions( $id ) );
+	}
+
+	public function test_a_queued_file_of_a_paused_job_with_all_its_attempts_used_is_given_up_not_parked() {
+		$id   = $this->upload();
+		$jobs = new \TrustOptimize\Bulk\BulkJobRepository( new DatabaseManager() );
+		$job  = $jobs->create( 'sync' );
+		$jobs->mark_running( $job->get_id() );
+		$this->attachments->assign_job( $id, $job->get_id() );
+		$this->assertTrue( $jobs->pause( $job->get_id() ) );
+		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+		$this->set_attempts( $id, AttachmentRepository::MAX_ATTEMPTS );
+
+		$this->queue()->process( $id );
+
+		$row = $this->attachments->get( $id );
+		$this->assertSame( array( AttachmentState::FAILED, 'max_attempts' ), array( $row['state'], $row['reason'] ), 'Parked, it would be refused after Resume and hold its job open.' );
+		$this->assertSame( array(), $this->pending_actions( $id ) );
+	}
+
+	/**
+	 * States a worker stored as its result.
+	 *
+	 * @return array[]
+	 */
+	public static function result_states() {
+		return array(
+			'optimized' => array( AttachmentState::OPTIMIZED ),
+			'partial'   => array( AttachmentState::PARTIAL ),
+			'skipped'   => array( AttachmentState::SKIPPED ),
+		);
+	}
+
+	/**
+	 * @dataProvider result_states
+	 *
+	 * @param string $state Stored state.
+	 */
+	public function test_a_late_action_never_turns_a_result_into_a_failure_because_of_the_count( $state ) {
+		$id = $this->upload();
+		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+		$this->attachments->set_state( $id, $state );
+		$this->set_attempts( $id, AttachmentRepository::MAX_ATTEMPTS );
+		$row      = $this->attachments->get( $id );
+		$variants = $this->variants->get_for_attachment( $id );
+
+		$this->queue()->process( $id );
+
+		$this->assertSame( $row, $this->attachments->get( $id ) );
+		$this->assertSame( $variants, $this->variants->get_for_attachment( $id ) );
 		$this->assertSame( array(), $this->pending_actions( $id ) );
 	}
 
