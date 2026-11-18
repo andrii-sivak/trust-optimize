@@ -19,11 +19,11 @@ use TrustOptimize\Storage\VariantRepository;
  *
  * The health check has two steps. Step 1 recovers a queue attempt that Action Scheduler confirms dead. Age alone proves nothing:
  * a worker that is slow, or one whose action Action Scheduler has given up on, may still be running.
- * So an attempt is recovered only when it has been silent for longer than STALE_CLAIM_SECONDS, holds no
+ * So an attempt is recovered only when it has been silent for longer than the recovery wait (the larger of STALE_CLAIM_SECONDS and the stale threshold), holds no
  * publication lease, and no Action Scheduler action of the attachment is pending or in progress.
  * An attempt that step 1 may not recover (a synchronous one, one from before the attempt record, one inside
- * a publication) is reported as held, for an operator to release. Step 2 stops a running job whose producer
- * has vanished, unless it was resumed while the queue is stuck and has simply not had a chance to work yet.
+ * a publication) is reported as held, for an operator to release. Step 2 stops a running job that shows no life:
+ * no producer step and no attempt evidence (a claim or a worker's variant change) within the stale threshold, unless it was resumed while the queue is stuck and has simply not had a chance to work yet.
  * The queue signals are diagnostics: they say what looks wrong with Action Scheduler and decide nothing.
  */
 class JobHealth {
@@ -162,7 +162,10 @@ class JobHealth {
 
 		$recovered = 0;
 
-		foreach ( $this->attachments->find_death_candidates( AttachmentRepository::STALE_CLAIM_SECONDS, self::BATCH_SIZE ) as $row ) {
+		// The same setting that tells how long a job may be silent tells how long a slow encode may run: a job is never stopped while its attempt is still protected here.
+		$wait = max( AttachmentRepository::STALE_CLAIM_SECONDS, $this->jobs->stale_after_seconds() );
+
+		foreach ( $this->attachments->find_death_candidates( $wait, self::BATCH_SIZE ) as $row ) {
 			if ( false !== $this->has_live_action( $row['attachment_id'] ) ) {
 				continue;
 			}
@@ -340,10 +343,10 @@ class JobHealth {
 	}
 
 	/**
-	 * Step 2: stop the running jobs whose producer vanished.
+	 * Step 2: stop the running jobs that show no life.
 	 *
-	 * A job silent for longer than the threshold is stopped, except a Resume that has had no chance yet: no work
-	 * finished since it, and either its producer is still scheduled or the queue shows a signal. Such a job is
+	 * A job with neither a producer step nor attempt evidence within the threshold is stopped, except a Resume that has had no chance yet: no
+	 * attempt evidence since it (no claim, no worker change), and either its producer is still scheduled or the queue shows a signal. Such a job is
 	 * waiting for Action Scheduler, and stopping it again would undo the Resume.
 	 *
 	 * @return int Number of jobs stopped.

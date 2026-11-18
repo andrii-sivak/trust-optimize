@@ -17,6 +17,7 @@ use TrustOptimize\Domain\JobStatus;
 use TrustOptimize\Domain\PauseReason;
 use TrustOptimize\Domain\VariantStatus;
 use TrustOptimize\Queue\ConversionQueue;
+use TrustOptimize\Queue\Maintenance;
 use TrustOptimize\Storage\AttachmentRepository;
 use TrustOptimize\Storage\VariantRepository;
 
@@ -102,6 +103,76 @@ class JobHealthTest extends WP_UnitTestCase {
 		$wpdb->update( ( new DatabaseManager() )->get_plugin_table_names()['jobs'], array( 'resumed_at' => gmdate( 'Y-m-d H:i:s', time() - 20 * MINUTE_IN_SECONDS ) ), array( 'id' => $job->get_id() ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 
 		return $job->get_id();
+	}
+
+	/**
+	 * A running sync job whose row has been silent for a while and whose producer is not scheduled.
+	 *
+	 * @param int $silent_seconds Seconds since the producer's last step.
+	 * @return int Job ID.
+	 */
+	private function silent_job( $silent_seconds = 1080 ) {
+		$job = Plugin::get_instance()->bulk_producer->launch( BulkJob::TYPE_SYNC )->get_id();
+		as_unschedule_all_actions( BulkProducer::HOOK_PRODUCE );
+		$this->age_job( $job, $silent_seconds );
+
+		return $job;
+	}
+
+	/**
+	 * What a worker leaves behind: a variant it moved, and the attachment's closing write.
+	 *
+	 * @param int         $id      Attachment ID.
+	 * @param int         $job     Job ID.
+	 * @param string      $status  Variant status.
+	 * @param string|null $reason  Variant reason.
+	 * @param int         $seconds How long ago it happened.
+	 */
+	private function worker_change( $id, $job, $status, $reason = null, $seconds = 0 ) {
+		$this->attachments->assign_job( $id, $job );
+		$this->variants->upsert(
+			array(
+				'attachment_id' => $id,
+				'size_name'     => 'original',
+				'format'        => 'webp',
+				'status'        => $status,
+				'reason'        => $reason,
+			)
+		);
+		$this->attachments->set_state( $id, AttachmentState::OPTIMIZED );
+		$this->age_variants( $id, $seconds );
+		$this->age_attachment( $id, $seconds );
+	}
+
+	/**
+	 * Move the timestamps of an attachment's variants into the past.
+	 *
+	 * @param int $id      Attachment ID.
+	 * @param int $seconds How long ago.
+	 */
+	private function age_variants( $id, $seconds ) {
+		global $wpdb;
+
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['variants'];
+		// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET updated_at = %s WHERE attachment_id = %d", gmdate( 'Y-m-d H:i:s', time() - $seconds ), $id ) );
+		$this->variants->invalidate( $id );
+	}
+
+	/**
+	 * A queue attempt of the job that claimed the attachment some time ago.
+	 *
+	 * @param int $id      Attachment ID.
+	 * @param int $job     Job ID.
+	 * @param int $seconds Seconds since the claim.
+	 * @return string The token.
+	 */
+	private function claimed( $id, $job, $seconds ) {
+		$this->attachments->assign_job( $id, $job );
+		$token = $this->attachments->claim( $id, AttachmentRepository::SOURCE_QUEUE );
+		$this->age_attachment( $id, $seconds );
+
+		return $token;
 	}
 
 	private function status( $job_id ) {
@@ -217,14 +288,12 @@ class JobHealthTest extends WP_UnitTestCase {
 		$this->assertSame( JobStatus::RUNNING, $this->status( $job ) );
 	}
 
-	public function test_a_resumed_job_that_made_progress_is_judged_by_the_old_test() {
+	public function test_a_resumed_job_whose_progress_is_older_than_the_threshold_is_stopped() {
 		$job = $this->resumed_job();
-		$id  = 808;
-		$this->attachments->assign_job( $id, $job );
-		$this->attachments->set_state( $id, AttachmentState::OPTIMIZED );
+		$this->worker_change( 808, $job, VariantStatus::DONE, null, 1000 );
 		as_unschedule_all_actions( BulkProducer::HOOK_PRODUCE );
-		$this->age_job( $job, 20 * MINUTE_IN_SECONDS );
 
+		$this->assertTrue( $this->jobs->has_progress_since_resume( $this->jobs->get( $job ) ) );
 		$this->assertSame( 1, $this->health->stop_stale_jobs() );
 	}
 
@@ -232,13 +301,12 @@ class JobHealthTest extends WP_UnitTestCase {
 		$job = $this->resumed_job();
 		as_unschedule_all_actions( BulkProducer::HOOK_PRODUCE );
 		$data = $this->jobs->get( $job );
-		$this->attachments->assign_job( 809, $job );
+		$this->worker_change( 809, $job, VariantStatus::FAILED, 'max_attempts' );
 		$this->attachments->set_state( 809, AttachmentState::FAILED, 'max_attempts' );
 
 		$this->assertFalse( $this->jobs->has_progress_since_resume( $data ), 'The death compare-and-set is not work.' );
 
-		$this->attachments->assign_job( 810, $job );
-		$this->attachments->set_state( 810, AttachmentState::FAILED, 'save_failed' );
+		$this->worker_change( 810, $job, VariantStatus::FAILED, 'save_failed' );
 
 		$this->assertTrue( $this->jobs->has_progress_since_resume( $data ) );
 	}
@@ -246,9 +314,7 @@ class JobHealthTest extends WP_UnitTestCase {
 	public function test_work_that_finished_before_the_resume_is_not_progress_since_it() {
 		$job = $this->jobs->create( 'sync' )->get_id();
 		$this->jobs->mark_running( $job );
-		$this->attachments->assign_job( 811, $job );
-		$this->attachments->set_state( 811, AttachmentState::OPTIMIZED );
-		$this->age_attachment( 811, HOUR_IN_SECONDS );
+		$this->worker_change( 811, $job, VariantStatus::DONE, null, HOUR_IN_SECONDS );
 		$this->jobs->pause( $job );
 		$this->jobs->mark_running( $job, str_repeat( 'a', 32 ) );
 
@@ -362,8 +428,7 @@ class JobHealthTest extends WP_UnitTestCase {
 
 	public function test_a_resumed_job_that_made_progress_is_stopped_after_aging_although_its_producer_is_pending() {
 		$job = $this->resumed_job();
-		$this->attachments->assign_job( 812, $job );
-		$this->attachments->set_state( 812, AttachmentState::OPTIMIZED );
+		$this->worker_change( 812, $job, VariantStatus::DONE, null, 1000 );
 		$this->assertNotEmpty( as_get_scheduled_actions( array( 'hook' => BulkProducer::HOOK_PRODUCE, 'status' => ActionScheduler_Store::STATUS_PENDING ), 'ids' ) );
 		$this->age_job( $job, 20 * MINUTE_IN_SECONDS );
 
@@ -376,5 +441,358 @@ class JobHealthTest extends WP_UnitTestCase {
 		$this->age_job( $job, 20 * MINUTE_IN_SECONDS );
 
 		$this->assertSame( 1, $this->health->stop_stale_jobs() );
+	}
+
+	public function test_a_job_stays_running_while_its_conversions_are_claimed_and_finished_although_its_row_is_old() {
+		$job = $this->silent_job( 1080 );
+		$this->worker_change( 820, $job, VariantStatus::DONE );
+		$this->claimed( 821, $job, 60 );
+
+		$this->health->check_admin_load();
+
+		$this->assertSame( JobStatus::RUNNING, $this->status( $job ) );
+	}
+
+	public function test_real_conversions_of_a_producer_that_handed_over_keep_the_job_alive() {
+		$producer = Plugin::get_instance()->bulk_producer;
+		remove_filter( 'wp_generate_attachment_metadata', array( Plugin::get_instance()->conversion_queue, 'handle_new_metadata' ), 20 );
+		$ids = array();
+		for ( $i = 0; $i < 3; $i++ ) {
+			$ids[] = self::factory()->attachment->create_upload_object( DIR_TESTDATA . '/images/test-image.jpg' );
+		}
+		add_filter( 'wp_generate_attachment_metadata', array( Plugin::get_instance()->conversion_queue, 'handle_new_metadata' ), 20, 2 );
+		add_filter(
+			'trust_optimize_bulk_batch_size',
+			static function () {
+				return 2;
+			}
+		);
+		$job = $producer->launch( BulkJob::TYPE_SYNC )->get_id();
+		as_unschedule_all_actions( BulkProducer::HOOK_PRODUCE );
+		$producer->produce( $job );
+		// Only the conversions may run now: the successor producer would refresh the job row itself.
+		as_unschedule_all_actions( BulkProducer::HOOK_PRODUCE );
+		$this->age_job( $job, 1080 );
+		$aged = $this->jobs->get( $job )->to_array()['updated_at'];
+
+		ActionScheduler_QueueRunner::instance()->run();
+		$this->assertSame( $aged, $this->jobs->get( $job )->to_array()['updated_at'], 'No producer step refreshed the job row.' );
+		$this->health->check_admin_load();
+
+		foreach ( array_slice( $ids, 0, 2 ) as $id ) {
+			$this->assertSame( AttachmentState::OPTIMIZED, $this->attachments->get_state( $id ) );
+		}
+		$this->assertSame( JobStatus::RUNNING, $this->status( $job ), 'The workers\' own writes keep it alive.' );
+
+		$producer->produce( $job );
+
+		$this->assertNotEmpty( as_get_scheduled_actions( array( 'hook' => BulkProducer::HOOK_PRODUCE, 'status' => ActionScheduler_Store::STATUS_PENDING ), 'ids' ), 'The producer schedules its successor.' );
+	}
+
+	public function test_a_running_attempt_older_than_the_recovery_wait_is_alive_while_it_moves_variants() {
+		$job = $this->silent_job();
+		$this->claimed( 845, $job, 2000 );
+		$this->variants->upsert(
+			array(
+				'attachment_id' => 845,
+				'size_name'     => 'original',
+				'format'        => 'webp',
+				'status'        => VariantStatus::DONE,
+			)
+		);
+
+		$this->assertSame( array(), $this->jobs->find_stale_running( 900 ), 'A sync or a long budget keeps the claim old while variants move.' );
+
+		$this->age_variants( 845, 1000 );
+
+		$this->assertCount( 1, $this->jobs->find_stale_running( 900 ) );
+	}
+
+	public function test_a_claim_after_the_resume_is_progress_and_one_before_it_is_not() {
+		$job = $this->resumed_job();
+		$this->claimed( 846, $job, 1300 );
+		$this->assertFalse( $this->jobs->has_progress_since_resume( $this->jobs->get( $job ) ), 'Claimed before the Resume.' );
+
+		$this->claimed( 847, $job, 1000 );
+		$this->assertTrue( $this->jobs->has_progress_since_resume( $this->jobs->get( $job ) ) );
+
+		// The claim is older than the recovery wait and the producer is scheduled: the Resume skip no longer protects the job.
+		$this->assertSame( 1, $this->health->stop_stale_jobs() );
+	}
+
+	public function test_work_in_the_same_second_as_the_resume_is_not_progress_since_it() {
+		global $wpdb;
+
+		$job        = $this->resumed_job();
+		$resumed_at = $this->jobs->get( $job )->to_array()['resumed_at'];
+		$this->worker_change( 848, $job, VariantStatus::DONE );
+		$tables = ( new DatabaseManager() )->get_plugin_table_names();
+		$wpdb->update( $tables['variants'], array( 'updated_at' => $resumed_at ), array( 'attachment_id' => 848 ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$wpdb->update( $tables['attachments'], array( 'updated_at' => $resumed_at ), array( 'attachment_id' => 848 ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$this->variants->invalidate( 848 );
+
+		$this->assertFalse( $this->jobs->has_progress_since_resume( $this->jobs->get( $job ) ), 'Second precision: only later work counts.' );
+	}
+
+	public function test_a_job_whose_producer_stepped_within_the_threshold_is_alive() {
+		$job = $this->silent_job( 600 );
+
+		$this->assertSame( array(), $this->jobs->find_stale_running( 900 ) );
+		$this->health->check_admin_load();
+		$this->assertSame( JobStatus::RUNNING, $this->status( $job ) );
+	}
+
+	public function test_replanning_an_old_final_state_is_not_evidence() {
+		$job = $this->silent_job();
+		$this->worker_change( 830, $job, VariantStatus::DONE, null, 3 * HOUR_IN_SECONDS );
+
+		$this->attachments->recompute( 830 );
+
+		$this->assertSame( array( $job ), array_map( static fn( $found ) => $found->get_id(), $this->jobs->find_stale_running( 900 ) ) );
+		$this->health->check_admin_load();
+		$this->assertSame( JobStatus::PAUSED, $this->status( $job ) );
+	}
+
+	public function test_replanning_a_poison_file_is_no_evidence_for_liveness_or_for_progress_since_resume() {
+		$job = $this->resumed_job();
+		as_unschedule_all_actions( BulkProducer::HOOK_PRODUCE );
+		$this->worker_change( 831, $job, VariantStatus::FAILED, 'max_attempts', 3 * HOUR_IN_SECONDS );
+		$this->attachments->set_state( 831, AttachmentState::FAILED, 'max_attempts' );
+
+		$this->attachments->recompute( 831 );
+
+		$this->assertNull( $this->attachments->get( 831 )['reason'], 'recompute() rewrote the row with no reason.' );
+		$this->assertFalse( $this->jobs->has_progress_since_resume( $this->jobs->get( $job ) ) );
+		$this->assertSame( 1, $this->health->stop_stale_jobs() );
+	}
+
+	public function test_a_racing_planner_insert_of_a_done_variant_is_not_evidence() {
+		$job = $this->silent_job();
+		$this->worker_change( 832, $job, VariantStatus::DONE, null, 3 * HOUR_IN_SECONDS );
+		// The shape of a planner insert: the wanted variant, without a status.
+		$this->variants->upsert(
+			array(
+				'attachment_id'        => 832,
+				'size_name'            => 'original',
+				'format'               => 'webp',
+				'source_relative_path' => '2026/11/racing.jpg',
+				'width'                => 640,
+				'height'               => 480,
+				'source_file_size'     => 12345,
+			)
+		);
+		$this->attachments->recompute( 832 );
+
+		$this->assertCount( 1, $this->jobs->find_stale_running( 900 ) );
+	}
+
+	public function test_a_dead_worker_without_a_runner_is_stopped_once_its_claim_is_older_than_the_threshold() {
+		$job = $this->silent_job();
+		$this->claimed( 833, $job, 1000 );
+
+		$this->assertSame( 1, $this->health->stop_stale_jobs() );
+		$this->assertSame( JobStatus::PAUSED, $this->status( $job ) );
+	}
+
+	public function test_recoveries_and_repairs_are_not_evidence() {
+		global $wpdb;
+
+		$job    = $this->silent_job();
+		$tables = ( new DatabaseManager() )->get_plugin_table_names();
+		// The death compare-and-set on its poison branch, a requeue, a release, a park and the poison compare-and-set of a late action.
+		$token = $this->claimed( 834, $job, 2000 );
+		$wpdb->update( $tables['attachments'], array( 'attempts' => AttachmentRepository::MAX_ATTEMPTS ), array( 'attachment_id' => 834 ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$this->variants->upsert(
+			array(
+				'attachment_id' => 834,
+				'size_name'     => 'original',
+				'format'        => 'webp',
+				'status'        => VariantStatus::PROCESSING,
+			)
+		);
+		$this->age_variants( 834, 2000 );
+		$this->assertTrue( $this->attachments->recover_dead( 834, $token ) );
+		$this->attachments->set_state( 835, AttachmentState::QUEUED );
+		$this->attachments->assign_job( 835, $job );
+		$this->age_attachment( 835, 2000 );
+		$this->assertTrue( $this->attachments->requeue( 835, 900 ) );
+		$this->claimed( 836, $job, 2000 );
+		$this->variants->upsert(
+			array(
+				'attachment_id' => 836,
+				'size_name'     => 'original',
+				'format'        => 'webp',
+			)
+		);
+		$this->age_variants( 836, 2000 );
+		$this->attachments->release( 836, $this->attachments->get( 836 )['attempt_token'], $this->attachments->get( 836 )['updated_at'], null );
+		$this->assertSame( AttachmentState::FAILED, $this->attachments->get_state( 834 ), 'The poison branch ran.' );
+
+		// A park needs the job paused at that moment; flip the status without touching the job row's time.
+		$this->attachments->set_state( 849, AttachmentState::QUEUED );
+		$this->attachments->assign_job( 849, $job );
+		$wpdb->update( $tables['jobs'], array( 'status' => JobStatus::PAUSED ), array( 'id' => $job ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$this->assertTrue( $this->attachments->park( 849 ) );
+		$wpdb->update( $tables['jobs'], array( 'status' => JobStatus::RUNNING ), array( 'id' => $job ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+
+		$this->attachments->set_state( 850, AttachmentState::QUEUED );
+		$this->attachments->assign_job( 850, $job );
+		$this->variants->upsert(
+			array(
+				'attachment_id' => 850,
+				'size_name'     => 'original',
+				'format'        => 'webp',
+			)
+		);
+		$this->age_variants( 850, 2000 );
+		$wpdb->update( $tables['attachments'], array( 'attempts' => AttachmentRepository::MAX_ATTEMPTS ), array( 'attachment_id' => 850 ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$this->assertTrue( $this->attachments->give_up( 850 ) );
+
+		$this->assertSame( 1, $this->health->stop_stale_jobs() );
+	}
+
+	public function test_a_variant_change_of_another_job_is_not_evidence_for_this_one() {
+		$job = $this->silent_job();
+		$this->worker_change( 837, $job + 1000, VariantStatus::DONE );
+
+		$this->assertSame( 1, $this->health->stop_stale_jobs() );
+		$this->assertSame( JobStatus::PAUSED, $this->status( $job ) );
+	}
+
+	public function test_a_raised_threshold_keeps_the_job_alive_through_a_slow_claim_until_the_threshold() {
+		add_filter(
+			'trust_optimize_bulk_stale_after_seconds',
+			static function () {
+				return 3600;
+			}
+		);
+		$job = $this->silent_job( 4000 );
+		$this->claimed( 838, $job, 1200 );
+
+		$this->assertSame( 0, $this->health->stop_stale_jobs() );
+		$this->assertSame( JobStatus::RUNNING, $this->status( $job ) );
+
+		$this->age_attachment( 838, 3700 );
+
+		$this->assertSame( 1, $this->health->stop_stale_jobs() );
+	}
+
+	public function test_a_low_threshold_keeps_the_job_alive_through_a_claim_until_the_recovery_wait() {
+		add_filter(
+			'trust_optimize_bulk_stale_after_seconds',
+			static function () {
+				return 300;
+			}
+		);
+		$job = $this->silent_job( 700 );
+		$this->claimed( 839, $job, 600 );
+
+		$this->assertSame( 0, $this->health->stop_stale_jobs(), 'A claim of 600 s is still protected from recovery.' );
+
+		$this->age_attachment( 839, 1000 );
+
+		$this->assertSame( 1, $this->health->stop_stale_jobs() );
+	}
+
+	public function test_a_producer_wait_keeps_a_job_alive_while_a_sync_attempt_is_held() {
+		$job = $this->silent_job( 1080 );
+		$this->attachments->assign_job( 840, $job );
+		$this->attachments->claim( 840, AttachmentRepository::SOURCE_SYNC );
+		$this->age_attachment( 840, 2000 );
+		$this->jobs->touch( $job );
+
+		$this->health->check_admin_load();
+
+		$this->assertSame( JobStatus::RUNNING, $this->status( $job ) );
+		$this->assertCount( 1, $this->health->held() );
+	}
+
+	public function test_only_an_admin_page_load_stops_a_job_without_evidence() {
+		$job = $this->silent_job();
+		add_filter( 'wp_doing_cron', '__return_true' );
+
+		try {
+			$this->health->check_admin_load();
+			$this->assertSame( JobStatus::RUNNING, $this->status( $job ), 'Cron changes nothing.' );
+			$this->health->recover_attempts();
+			$this->assertSame( JobStatus::RUNNING, $this->status( $job ), 'Step 1 alone never stops a job.' );
+		} finally {
+			remove_filter( 'wp_doing_cron', '__return_true' );
+		}
+	}
+
+	/**
+	 * Set the stale threshold for the rest of the test.
+	 *
+	 * @param int $seconds Threshold in seconds.
+	 */
+	private function set_threshold( $seconds ) {
+		add_filter(
+			'trust_optimize_bulk_stale_after_seconds',
+			static function () use ( $seconds ) {
+				return $seconds;
+			}
+		);
+	}
+
+	public function test_a_raised_threshold_stretches_the_recovery_wait_on_every_path_that_runs_step_one() {
+		$this->set_threshold( 3600 );
+		$job = $this->silent_job( 4000 );
+		$id  = 860;
+		$this->claimed( $id, $job, 1200 );
+		$action = as_enqueue_async_action( ConversionQueue::HOOK_PROCESS, array( 'attachment_id' => $id ), ConversionQueue::GROUP );
+		$this->make_action_old( $action, 1200, ActionScheduler_Store::STATUS_FAILED );
+
+		$this->health->check_admin_load();
+		$this->assertSame( 0, ( new Maintenance( $this->attachments, Plugin::get_instance()->conversion_queue, $this->health ) )->run() );
+		$this->assertSame( AttachmentState::PROCESSING, $this->attachments->get_state( $id ), 'Neither an admin load nor Maintenance recovers it.' );
+		$this->assertSame( JobStatus::RUNNING, $this->status( $job ), 'And the job is not stopped.' );
+
+		$producer = Plugin::get_instance()->bulk_producer;
+		$this->assertTrue( $producer->pause( $job ) );
+		$this->assertTrue( $producer->resume( $job ) );
+		$this->assertSame( AttachmentState::PROCESSING, $this->attachments->get_state( $id ), 'Nor does Resume.' );
+	}
+
+	public function test_a_claim_past_the_raised_threshold_is_recovered_once_when_nothing_is_pending() {
+		$this->set_threshold( 3600 );
+		$job   = $this->silent_job( 4000 );
+		$id    = 861;
+		$token = $this->claimed( $id, $job, 3700 );
+
+		$this->assertSame( 1, $this->health->recover_attempts() );
+		$this->assertSame( 0, $this->health->recover_attempts() );
+
+		$row = $this->attachments->get( $id );
+		$this->assertSame( AttachmentState::QUEUED, $row['state'] );
+		$this->assertNotSame( $token, $row['attempt_token'] );
+		$this->assertNull( $row['attempt_token'] );
+	}
+
+	public function test_a_claim_past_the_raised_threshold_with_a_live_action_is_not_recovered() {
+		$this->set_threshold( 3600 );
+		$job = $this->silent_job( 4000 );
+		$id  = 862;
+		$this->claimed( $id, $job, 3700 );
+		$action = as_enqueue_async_action( ConversionQueue::HOOK_PROCESS, array( 'attachment_id' => $id ), ConversionQueue::GROUP );
+		$this->make_action_old( $action, 3700, ActionScheduler_Store::STATUS_RUNNING );
+
+		$this->assertSame( 0, $this->health->recover_attempts() );
+		$this->assertSame( AttachmentState::PROCESSING, $this->attachments->get_state( $id ) );
+	}
+
+	public function test_a_low_threshold_never_shortens_the_recovery_wait_below_900_seconds() {
+		$this->set_threshold( 300 );
+		$job = $this->silent_job( 700 );
+		$id  = 863;
+		$this->claimed( $id, $job, 600 );
+
+		$this->assertSame( 0, $this->health->recover_attempts(), 'Claimed 600 s ago: protected.' );
+		$this->assertSame( 0, $this->health->stop_stale_jobs() );
+
+		$this->age_attachment( $id, 1000 );
+
+		$this->health->check_admin_load();
+		$this->assertSame( AttachmentState::QUEUED, $this->attachments->get_state( $id ), 'Past 900 s the dead attempt is recovered.' );
 	}
 }

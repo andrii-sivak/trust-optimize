@@ -92,7 +92,7 @@ class Lifecycle {
 		Maintenance::schedule();
 
 		if ( function_exists( 'as_enqueue_async_action' ) ) {
-			as_enqueue_async_action( self::HOOK_RESTORE, array(), ConversionQueue::GROUP, true );
+			as_enqueue_async_action( self::HOOK_RESTORE, array(), ConversionQueue::GROUP, true, ConversionQueue::PRIORITY_SERVICE );
 		}
 	}
 
@@ -112,7 +112,7 @@ class Lifecycle {
 		}
 
 		if ( $queued > 0 && count( $ids ) === self::BATCH_SIZE ) {
-			as_enqueue_async_action( self::HOOK_RESTORE, array(), ConversionQueue::GROUP );
+			as_enqueue_async_action( self::HOOK_RESTORE, array(), ConversionQueue::GROUP, false, ConversionQueue::PRIORITY_SERVICE );
 		}
 
 		return $queued;

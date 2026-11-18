@@ -75,7 +75,7 @@ class Maintenance {
 	 */
 	public static function schedule() {
 		if ( function_exists( 'as_schedule_recurring_action' ) && ! as_has_scheduled_action( self::HOOK, null, ConversionQueue::GROUP ) ) {
-			as_schedule_recurring_action( time() + HOUR_IN_SECONDS, HOUR_IN_SECONDS, self::HOOK, array(), ConversionQueue::GROUP, true );
+			as_schedule_recurring_action( time() + HOUR_IN_SECONDS, HOUR_IN_SECONDS, self::HOOK, array(), ConversionQueue::GROUP, true, ConversionQueue::PRIORITY_SERVICE );
 		}
 	}
 

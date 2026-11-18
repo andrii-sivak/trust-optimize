@@ -37,9 +37,14 @@ class ConversionQueue {
 	const SCHEMA_RETRY_SECONDS = HOUR_IN_SECONDS;
 
 	/**
-	 * Priority of tasks that continue work already started or that wait for the database update (Action Scheduler runs a lower number first, so these yield to default-priority tasks).
+	 * Priority of the plugin's own service actions: the bulk producer, Maintenance and Restore (Action Scheduler runs a lower number first).
 	 */
-	const PRIORITY_RESUMED = 20;
+	const PRIORITY_SERVICE = 10;
+
+	/**
+	 * Priority of conversion actions (Action Scheduler runs a lower number first, so conversions yield to the service actions and to default-priority tasks of other plugins).
+	 */
+	const PRIORITY_CONVERSION = 20;
 
 	/**
 	 * Attachment repository.
@@ -165,7 +170,7 @@ class ConversionQueue {
 			return false;
 		}
 
-		return $this->schedule_or_park( $attachment_id, self::PRIORITY_RESUMED );
+		return $this->schedule_or_park( $attachment_id );
 	}
 
 	/**
@@ -179,11 +184,17 @@ class ConversionQueue {
 
 		// The claim writes columns of the newest schema: wait for the migration instead of spending an attempt.
 		if ( ! $this->database->has_schema( DatabaseManager::SCHEMA_RECOVERY ) ) {
-			$this->schedule( $attachment_id, self::SCHEMA_RETRY_SECONDS, self::PRIORITY_RESUMED );
+			$this->schedule( $attachment_id, self::SCHEMA_RETRY_SECONDS );
 			return;
 		}
 
 		$result = $this->processor->run( $attachment_id );
+
+		// A file that already used all its attempts is not converted again by a late action; one that no attempt holds is closed here.
+		if ( AttachmentProcessor::ATTEMPTS_EXHAUSTED === $result->get_message() ) {
+			$this->attachments->give_up( $attachment_id );
+			return;
+		}
 
 		// Held by another worker, or the bulk job it belongs to is paused: park it when the job is, and when the park misses
 		// (the job was resumed meanwhile) take the claim once more.
@@ -237,11 +248,10 @@ class ConversionQueue {
 	 * Without a job the attachment stays queued for the maintenance task that repairs lost queued attachments.
 	 *
 	 * @param int $attachment_id Attachment ID.
-	 * @param int $priority      Action Scheduler priority; lower runs first.
 	 * @return bool True when an action was scheduled.
 	 */
-	private function schedule_or_park( $attachment_id, $priority = 10 ) {
-		if ( $this->schedule( $attachment_id, 0, $priority ) ) {
+	private function schedule_or_park( $attachment_id ) {
+		if ( $this->schedule( $attachment_id ) ) {
 			return true;
 		}
 
@@ -255,18 +265,17 @@ class ConversionQueue {
 	 *
 	 * @param int $attachment_id Attachment ID.
 	 * @param int $delay         Seconds from now; 0 runs it as soon as a runner is free.
-	 * @param int $priority      Action Scheduler priority; lower runs first.
 	 * @return bool True when Action Scheduler accepted the action.
 	 */
-	private function schedule( $attachment_id, $delay = 0, $priority = 10 ) {
+	private function schedule( $attachment_id, $delay = 0 ) {
 		$args = array( 'attachment_id' => (int) $attachment_id );
 
 		try {
 			if ( $delay > 0 ) {
-				return 0 !== as_schedule_single_action( time() + $delay, self::HOOK_PROCESS, $args, self::GROUP, false, $priority );
+				return 0 !== as_schedule_single_action( time() + $delay, self::HOOK_PROCESS, $args, self::GROUP, false, self::PRIORITY_CONVERSION );
 			}
 
-			return 0 !== as_enqueue_async_action( self::HOOK_PROCESS, $args, self::GROUP, false, $priority );
+			return 0 !== as_enqueue_async_action( self::HOOK_PROCESS, $args, self::GROUP, false, self::PRIORITY_CONVERSION );
 		} catch ( Throwable $throwable ) {
 			return false;
 		}

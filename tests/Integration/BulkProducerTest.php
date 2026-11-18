@@ -269,6 +269,88 @@ class BulkProducerTest extends WP_UnitTestCase {
 		$this->assertSame( JobStatus::RUNNING, $this->jobs->get( $job->get_id() )->get_status() );
 	}
 
+	/**
+	 * Priorities of the pending actions of a hook.
+	 *
+	 * @param string $hook Hook.
+	 * @return int[]
+	 */
+	private function priorities( $hook ) {
+		$actions = as_get_scheduled_actions(
+			array(
+				'hook'   => $hook,
+				'status' => ActionScheduler_Store::STATUS_PENDING,
+			)
+		);
+
+		return array_values( array_map( static fn( $action ) => $action->get_priority(), $actions ) );
+	}
+
+	public function test_the_producer_runs_at_priority_10_and_what_it_hands_over_at_priority_20() {
+		$this->upload();
+		$this->upload();
+		$job = $this->producer->launch( BulkJob::TYPE_SYNC );
+		$this->assertSame( array( 10 ), $this->priorities( BulkProducer::HOOK_PRODUCE ), 'The first producer run.' );
+		as_unschedule_all_actions( BulkProducer::HOOK_PRODUCE );
+
+		$this->producer->produce( $job->get_id() );
+
+		$this->assertSame( array( 20, 20 ), $this->priorities( ConversionQueue::HOOK_PROCESS ), 'The hand-over.' );
+		$this->assertSame( array( 10 ), $this->priorities( BulkProducer::HOOK_PRODUCE ), 'The producer waits for its conversions at the service priority.' );
+	}
+
+	public function test_a_producer_that_waits_behind_a_backlog_is_scheduled_at_priority_10() {
+		$job = $this->producer->launch( BulkJob::TYPE_SYNC );
+		as_unschedule_all_actions( BulkProducer::HOOK_PRODUCE );
+		as_enqueue_async_action( ConversionQueue::HOOK_PROCESS, array( 'attachment_id' => 999998 ), ConversionQueue::GROUP, false, 20 );
+		as_enqueue_async_action( ConversionQueue::HOOK_PROCESS, array( 'attachment_id' => 999999 ), ConversionQueue::GROUP, false, 20 );
+		add_filter(
+			'trust_optimize_bulk_max_pending',
+			static function () {
+				return 1;
+			}
+		);
+
+		$this->producer->produce( $job->get_id() );
+
+		$this->assertSame( array( 10 ), $this->priorities( BulkProducer::HOOK_PRODUCE ) );
+	}
+
+	public function test_at_the_limit_the_producer_queues_a_batch_of_parked_and_a_batch_of_new_attachments() {
+		$first  = $this->upload();
+		$second = $this->upload();
+		$third  = $this->upload();
+		add_filter(
+			'trust_optimize_bulk_batch_size',
+			static function () {
+				return 1;
+			}
+		);
+		$job = $this->producer->launch( BulkJob::TYPE_SYNC );
+		$this->producer->produce( $job->get_id() );
+		$this->assertTrue( $this->producer->pause( $job->get_id() ) );
+		ActionScheduler_QueueRunner::instance()->run();
+		$this->assertSame( 1, $this->attachments->count_parked( $job->get_id() ) );
+		$this->assertTrue( $this->producer->resume( $job->get_id() ) );
+
+		// Another plugin's backlog fills the limit exactly.
+		as_unschedule_all_actions( BulkProducer::HOOK_PRODUCE );
+		as_enqueue_async_action( ConversionQueue::HOOK_PROCESS, array( 'attachment_id' => 999999 ), ConversionQueue::GROUP, false, 20 );
+		add_filter(
+			'trust_optimize_bulk_max_pending',
+			static function () {
+				return 1;
+			}
+		);
+
+		$this->producer->produce( $job->get_id() );
+
+		$this->assertSame( AttachmentState::QUEUED, $this->attachments->get_state( $first ), 'The parked one is queued again.' );
+		$this->assertSame( AttachmentState::QUEUED, $this->attachments->get_state( $second ), 'One batch after the cursor.' );
+		$this->assertSame( AttachmentState::NONE, $this->attachments->get_state( $third ) );
+		$this->assertSame( array( 20, 20, 20 ), $this->priorities( ConversionQueue::HOOK_PROCESS ), 'The limit holder, the parked one and the new one.' );
+	}
+
 	public function test_a_paused_job_is_not_produced_and_resumes() {
 		$id  = $this->upload();
 		$job = $this->producer->launch( BulkJob::TYPE_SYNC );

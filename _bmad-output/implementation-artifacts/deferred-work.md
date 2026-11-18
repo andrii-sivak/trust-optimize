@@ -13,3 +13,8 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-30-dead-worker-recovery.md`
   summary: `wp trust-optimize sync --now` (schema-pending stop and the busy warning) and the `queue_signals` column of `wp trust-optimize status` have no tests.
   evidence: Both go through `\WP_CLI\Utils\make_progress_bar` or `format_items`, which the test WP_CLI stub does not provide; REST covers the shared `JobHealth::queue_signals()` and `AttachmentProcessor::sync()` paths. Found by the verification-gap review of #30.
+
+## Deferred from: code review of spec-gh-34-progress-liveness.md (2026-11-18)
+
+- Cost of the attempt-evidence query (`BulkJobRepository::attempt_evidence()`) for a silent large job: it reads every attachment row of the job through `job_state` to check `updated_at`. Same shape as `has_progress_since_resume()` before #34; runs only while the producer is silent past the threshold. Measure with EXPLAIN on the stand before deciding on a `(job_id, updated_at)` index (schema change).
+- `AttachmentProcessor::convert_pending()` maps a derived `processing` state to `queued` + `more` and its closing write resets attempts, so an orphan reset that keeps failing reschedules forever without tripping the poison guard. Pre-existing; needs repeated DB errors.

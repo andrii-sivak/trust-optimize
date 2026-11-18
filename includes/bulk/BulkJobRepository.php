@@ -11,6 +11,8 @@ use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Domain\JobStatus;
 use TrustOptimize\Domain\PauseReason;
+use TrustOptimize\Domain\VariantStatus;
+use TrustOptimize\Storage\AttachmentRepository;
 
 /**
  * Class BulkJobRepository
@@ -357,9 +359,9 @@ class BulkJobRepository {
 	/**
 	 * Whether the job made progress since its last Resume.
 	 *
-	 * Derived from data that only real work writes. A sync job has progress when one of its attachments
-	 * ended a worker attempt (optimized, partial, skipped, or failed other than by running out of attempts)
-	 * after the Resume; the other types when the cursor moved. The producer waiting (touch()) is never progress.
+	 * Derived from data that only real work writes. A sync job has progress when a worker claimed or changed
+	 * something of its attachments since the Resume (attempt evidence); the other types when the cursor moved.
+	 * The producer waiting (touch()) is never progress.
 	 *
 	 * @param BulkJob $job Job that has been resumed.
 	 * @return bool
@@ -373,21 +375,52 @@ class BulkJobRepository {
 			return $job->get_cursor_id() > (int) ( $data['resume_cursor_id'] ?? 0 );
 		}
 
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery
+		$resumed_at = (string) ( $data['resumed_at'] ?? '' );
+
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared -- The only dynamic part is the evidence condition, which is itself prepared.
 		return (bool) $wpdb->get_var(
 			$wpdb->prepare(
-				'SELECT 1 FROM %i WHERE job_id = %d AND updated_at > %s AND ( state IN (%s, %s, %s) OR ( state = %s AND ( reason IS NULL OR reason <> %s ) ) ) LIMIT 1',
-				$this->db_manager->get_table_name( 'trust_optimize_attachments' ),
-				$job->get_id(),
-				(string) ( $data['resumed_at'] ?? '' ),
-				AttachmentState::OPTIMIZED,
-				AttachmentState::PARTIAL,
-				AttachmentState::SKIPPED,
-				AttachmentState::FAILED,
-				'max_attempts'
+				'SELECT 1 FROM %i j WHERE j.id = %d AND ' . $this->attempt_evidence( $resumed_at, $resumed_at ) . ' LIMIT 1',
+				$this->get_table_name(),
+				$job->get_id()
 			)
 		);
 		// phpcs:enable
+	}
+
+	/**
+	 * SQL condition: the job "j" has attempt evidence among its attachments.
+	 *
+	 * The one definition of "a worker worked on this job". An attachment counts when it is processing since its claim
+	 * (only claim() stores that state, and its lease writes keep updated_at), or when a worker changed one of its
+	 * variants. The attachment row is looked at first: an attempt that ended refreshed it with its closing write,
+	 * and one still running is processing, however old its claim (a sync has no time budget). The stored state of an
+	 * attachment is never evidence: the planner, regeneration and cleanup rewrite it without any worker. The statuses a worker writes are the ones counted; the death and poison writes
+	 * (failed for max_attempts) and cleanup's delete failures are not a worker's, and the planner only writes pending.
+	 *
+	 * @param string $variant_since UTC time a worker's variant change must come after.
+	 * @param string $claim_since   UTC time a running claim must come after.
+	 * @return string Prepared condition on the alias "j" of the jobs table.
+	 */
+	private function attempt_evidence( $variant_since, $claim_since ) {
+		global $wpdb;
+
+		return $wpdb->prepare(
+			'EXISTS ( SELECT 1 FROM %i a WHERE a.job_id = j.id AND ( ( a.state = %s AND a.updated_at > %s ) OR ( ( a.state = %s OR a.updated_at > %s ) AND EXISTS ( SELECT 1 FROM %i v WHERE v.attachment_id = a.attachment_id AND v.updated_at > %s AND ( v.status IN ( %s, %s, %s ) OR ( v.status = %s AND ( v.reason IS NULL OR v.reason NOT IN ( %s, %s ) ) ) ) ) ) ) )',
+			$this->db_manager->get_table_name( 'trust_optimize_attachments' ),
+			AttachmentState::PROCESSING,
+			$claim_since,
+			AttachmentState::PROCESSING,
+			$variant_since,
+			$this->db_manager->get_table_name( 'trust_optimize_variants' ),
+			$variant_since,
+			VariantStatus::PROCESSING,
+			VariantStatus::DONE,
+			VariantStatus::SKIPPED,
+			VariantStatus::FAILED,
+			'max_attempts',
+			'delete_failed'
+		);
 	}
 
 	/**
@@ -558,7 +591,10 @@ class BulkJobRepository {
 	}
 
 	/**
-	 * Find running jobs that have been silent for longer than a threshold.
+	 * Find running jobs that show no life: no producer step and no attempt evidence within the threshold.
+	 *
+	 * A running claim counts for the recovery wait of its attempt, so a job is never stopped while its attempt is still
+	 * protected from recovery.
 	 *
 	 * @param int $stale_after_seconds Stale threshold in seconds.
 	 * @return array
@@ -566,14 +602,15 @@ class BulkJobRepository {
 	public function find_stale_running( $stale_after_seconds ) {
 		global $wpdb;
 
-		$table     = $this->get_table_name();
-		$threshold = gmdate( 'Y-m-d H:i:s', time() - (int) $stale_after_seconds );
+		$now       = time();
+		$threshold = gmdate( 'Y-m-d H:i:s', $now - (int) $stale_after_seconds );
+		$claims    = gmdate( 'Y-m-d H:i:s', $now - max( AttachmentRepository::STALE_CLAIM_SECONDS, (int) $stale_after_seconds ) );
 
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared -- The only dynamic part is the evidence condition, which is itself prepared.
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				'SELECT * FROM %i WHERE status = %s AND updated_at < %s ORDER BY id ASC',
-				$table,
+				'SELECT j.* FROM %i j WHERE j.status = %s AND j.updated_at < %s AND NOT ' . $this->attempt_evidence( $threshold, $claims ) . ' ORDER BY j.id ASC',
+				$this->get_table_name(),
 				JobStatus::RUNNING,
 				$threshold
 			),

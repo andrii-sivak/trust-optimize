@@ -35,7 +35,7 @@ class LifecycleTest extends WP_UnitTestCase {
 		parent::set_up();
 		update_option( CapabilityService::OPTION, array( 'webp' => true, 'avif' => false ) );
 		update_option( 'trust_optimize_options', array( 'convert_to_webp' => 1, 'convert_to_avif' => 0 ) );
-		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+		as_unschedule_all_actions( null, null, ConversionQueue::GROUP );
 
 		$database          = new DatabaseManager();
 		$this->attachments = new AttachmentRepository( $database, new VariantRepository( $database ) );
@@ -76,6 +76,32 @@ class LifecycleTest extends WP_UnitTestCase {
 			$this->assertSame( AttachmentState::OPTIMIZED, $this->attachments->get_state( $id ) );
 		}
 		$this->assertNotFalse( as_next_scheduled_action( Maintenance::HOOK, null, ConversionQueue::GROUP ), 'The maintenance is scheduled again.' );
+	}
+
+	public function test_the_restore_runs_at_priority_10_and_the_work_it_queues_at_priority_20() {
+		$id = self::factory()->attachment->create_upload_object( DIR_TESTDATA . '/images/test-image.jpg' );
+		Lifecycle::deactivate();
+
+		Lifecycle::activate();
+		$restore = as_get_scheduled_actions( array( 'hook' => Lifecycle::HOOK_RESTORE, 'status' => ActionScheduler_Store::STATUS_PENDING ) );
+		$this->assertSame( 10, reset( $restore )->get_priority() );
+
+		( new Lifecycle( $this->attachments, Plugin::get_instance()->conversion_queue ) )->restore();
+		$work = as_get_scheduled_actions( array( 'hook' => ConversionQueue::HOOK_PROCESS, 'status' => ActionScheduler_Store::STATUS_PENDING, 'args' => array( 'attachment_id' => $id ) ) );
+		$this->assertSame( 20, reset( $work )->get_priority() );
+	}
+
+	public function test_a_restore_that_has_more_to_do_schedules_itself_at_priority_10() {
+		for ( $i = 0; $i <= Lifecycle::BATCH_SIZE; $i++ ) {
+			$this->attachments->set_state( self::factory()->attachment->create(), AttachmentState::NONE, Lifecycle::REASON );
+		}
+		as_unschedule_all_actions( Lifecycle::HOOK_RESTORE );
+
+		( new Lifecycle( $this->attachments, Plugin::get_instance()->conversion_queue ) )->restore();
+
+		$restore = as_get_scheduled_actions( array( 'hook' => Lifecycle::HOOK_RESTORE, 'status' => ActionScheduler_Store::STATUS_PENDING ) );
+		$this->assertCount( 1, $restore );
+		$this->assertSame( 10, reset( $restore )->get_priority() );
 	}
 
 	public function test_a_running_job_is_paused_by_the_deactivation() {

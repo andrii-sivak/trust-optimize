@@ -287,12 +287,61 @@ class AttachmentRepository {
 	}
 
 	/**
+	 * Give up an attachment that used all its attempts and still waits for work, together with its open variants (compare-and-set).
+	 *
+	 * Only a queued or parked row that no attempt holds is closed: a processing row, or one with a token, belongs to a
+	 * live attempt and leaves through that attempt's own closing write, the death compare-and-set or a release. A row
+	 * whose stored state is a result (optimized, partial, skipped, failed) keeps it: the count alone is no reason to
+	 * rewrite what was converted. A variant still marked processing on a row nobody holds is an orphan and is given up
+	 * with the pending ones.
+	 *
+	 * @param int $attachment_id Attachment ID.
+	 * @return bool True when this call closed the attachment.
+	 */
+	public function give_up( $attachment_id ) {
+		global $wpdb;
+
+		$tables = $this->database->get_plugin_table_names();
+		$now    = current_time( 'mysql', true );
+
+		$changed = $wpdb->query(
+			$wpdb->prepare(
+				'UPDATE %i a LEFT JOIN %i v ON v.attachment_id = a.attachment_id AND v.status IN ( %s, %s )
+				SET a.state = %s, a.reason = %s, a.last_error = CONCAT( %s, a.attempts, %s ), a.updated_at = %s,
+					v.status = %s, v.reason = %s, v.updated_at = %s
+				WHERE a.attachment_id = %d AND a.attempts >= %d AND a.state IN ( %s, %s ) AND a.attempt_token IS NULL',
+				$tables['attachments'],
+				$tables['variants'],
+				VariantStatus::PENDING,
+				VariantStatus::PROCESSING,
+				AttachmentState::FAILED,
+				'max_attempts',
+				'The file used all its attempts (',
+				').',
+				$now,
+				VariantStatus::FAILED,
+				'max_attempts',
+				$now,
+				(int) $attachment_id,
+				self::MAX_ATTEMPTS,
+				AttachmentState::QUEUED,
+				AttachmentState::NONE
+			)
+		);
+
+		$this->variants->invalidate( $attachment_id );
+
+		return (int) $changed > 0;
+	}
+
+	/**
 	 * Take ownership of an attachment for processing (compare-and-set).
 	 *
 	 * A "processing" attachment is never taken over: only the death compare-and-set of the job health check
 	 * or an operator ends an attempt that did not end itself. The claim writes the attempt record (its source
 	 * and a new token) and counts as an attempt; a synchronous claim sets the count to 1, which is the explicit
-	 * retry of a file that failed too often. A queue claim does not take an attachment of a paused bulk job,
+	 * retry of a file that failed too often. A queue claim does not take a file that already used all its
+	 * attempts, so a late action cannot reopen it, and it does not take an attachment of a paused bulk job,
 	 * so a Pause that committed before the claim always wins.
 	 *
 	 * @param int    $attachment_id Attachment ID.
@@ -309,7 +358,7 @@ class AttachmentRepository {
 
 		$claimed = 1 === (int) $wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$this->table()} a SET a.state = %s, a.attempts = {$attempts}, a.attempt_source = %s, a.attempt_token = %s, a.publishing_at = NULL, a.updated_at = %s WHERE a.attachment_id = %d AND a.state <> %s AND ( %d = 0 OR NOT EXISTS ( SELECT 1 FROM %i j WHERE j.id = a.job_id AND j.status = %s ) )",
+				"UPDATE {$this->table()} a SET a.state = %s, a.attempts = {$attempts}, a.attempt_source = %s, a.attempt_token = %s, a.publishing_at = NULL, a.updated_at = %s WHERE a.attachment_id = %d AND a.state <> %s AND ( %d = 0 OR ( a.attempts < %d AND NOT EXISTS ( SELECT 1 FROM %i j WHERE j.id = a.job_id AND j.status = %s ) ) )",
 				AttachmentState::PROCESSING,
 				$source,
 				$token,
@@ -317,6 +366,7 @@ class AttachmentRepository {
 				(int) $attachment_id,
 				AttachmentState::PROCESSING,
 				self::SOURCE_QUEUE === $source ? 1 : 0,
+				self::MAX_ATTEMPTS,
 				$this->database->get_plugin_table_names()['jobs'],
 				JobStatus::PAUSED
 			)

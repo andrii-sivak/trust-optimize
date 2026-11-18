@@ -86,7 +86,7 @@ class VariantRepository {
 	/**
 	 * Insert or update the variant identified by (attachment_id, size_name, format).
 	 *
-	 * Only the columns present in $data are overwritten on an existing row.
+	 * Only the columns present in $data are overwritten on an existing row, and its updated_at moves only when $data sets a status.
 	 *
 	 * @param array $data Must contain attachment_id, size_name and format.
 	 * @return int Row id.
@@ -107,7 +107,13 @@ class VariantRepository {
 				'updated_at'    => $now,
 			)
 		);
-		$update        = array_merge( array_intersect_key( $data, self::DEFAULTS ), array( 'updated_at' => $now ) );
+		$update        = array_intersect_key( $data, self::DEFAULTS );
+
+		// Only a reset to pending is worth a new timestamp here: worker statuses are written by transitions, and a planner
+		// insert that races and finds the row must not look like work.
+		if ( VariantStatus::PENDING === ( $update['status'] ?? null ) ) {
+			$update['updated_at'] = $now;
+		}
 
 		$columns = array();
 		$values  = array();
@@ -124,6 +130,11 @@ class VariantRepository {
 		$assignments = array();
 		foreach ( array_keys( $update ) as $column ) {
 			$assignments[] = "{$column} = VALUES({$column})";
+		}
+
+		// An existing row may have nothing to change; the no-op keeps the statement valid.
+		if ( ! $assignments ) {
+			$assignments[] = 'id = id';
 		}
 
 		// phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter -- Column names are whitelisted by self::DEFAULTS, every value is a bound placeholder.

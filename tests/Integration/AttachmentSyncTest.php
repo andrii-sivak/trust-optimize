@@ -94,6 +94,31 @@ class AttachmentSyncTest extends WP_UnitTestCase {
 		$this->assertSame( 'up_to_date', $this->processor()->sync( $id )->get_message(), 'The next sync has nothing to do.' );
 	}
 
+	public function test_a_sync_that_cannot_reset_a_processing_variant_ends_the_attempt_as_failed_and_never_as_processing() {
+		global $wpdb;
+
+		$id = $this->upload();
+		$this->processor()->sync( $id );
+		$variant = $this->original_variant( $id );
+		$this->assertTrue( $this->variants->transition( $variant['id'], $variant['status'], 'processing' ) );
+		$break = static function ( $query ) {
+			return false !== strpos( $query, 'trust_optimize_variants' ) && 0 === strpos( ltrim( $query ), 'UPDATE' ) && false !== strpos( $query, "'pending'" ) ? 'SELECT * FROM trust_optimize_no_such_table' : $query;
+		};
+		add_filter( 'query', $break );
+		$wpdb->suppress_errors( true );
+		try {
+			$result = $this->processor()->sync( $id );
+		} finally {
+			$wpdb->suppress_errors( false );
+			remove_filter( 'query', $break );
+		}
+
+		$row = $this->attachments->get( $id );
+		$this->assertTrue( $result->is_failed() );
+		$this->assertSame( array( AttachmentState::FAILED, 'exception' ), array( $row['state'], $row['reason'] ) );
+		$this->assertNull( $row['attempt_token'] );
+	}
+
 	/**
 	 * The served webp variant of the original file.
 	 *

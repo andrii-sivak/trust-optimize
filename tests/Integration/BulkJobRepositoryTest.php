@@ -8,7 +8,11 @@
 use TrustOptimize\Bulk\BulkJobRepository;
 use TrustOptimize\Core\Plugin;
 use TrustOptimize\Database\DatabaseManager;
+use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Domain\JobStatus;
+use TrustOptimize\Domain\VariantStatus;
+use TrustOptimize\Storage\AttachmentRepository;
+use TrustOptimize\Storage\VariantRepository;
 
 /**
  * @covers \TrustOptimize\Bulk\BulkJobRepository::transition
@@ -212,5 +216,73 @@ class BulkJobRepositoryTest extends WP_UnitTestCase {
 		$this->assertSame( JobStatus::PAUSED, $row['status'] );
 		$this->assertSame( 'stopped', $row['pause_reason'] );
 		$this->assertSame( $error, $row['last_error'] );
+	}
+
+	/**
+	 * Variant writes and whether a worker made them.
+	 *
+	 * @return array[]
+	 */
+	public static function variant_writes() {
+		return array(
+			'processing'           => array( VariantStatus::PROCESSING, null, true ),
+			'done'                 => array( VariantStatus::DONE, null, true ),
+			'skipped'              => array( VariantStatus::SKIPPED, 'no_gain', true ),
+			'failed by a worker'   => array( VariantStatus::FAILED, 'save_failed', true ),
+			'failed, no reason'    => array( VariantStatus::FAILED, null, true ),
+			'pending'              => array( VariantStatus::PENDING, null, false ),
+			'failed, max_attempts' => array( VariantStatus::FAILED, 'max_attempts', false ),
+			'failed, delete'       => array( VariantStatus::FAILED, 'delete_failed', false ),
+		);
+	}
+
+	/**
+	 * @dataProvider variant_writes
+	 *
+	 * @param string      $status   Variant status.
+	 * @param string|null $reason   Variant reason.
+	 * @param bool        $evidence Whether it keeps the job alive.
+	 */
+	public function test_only_a_workers_variant_writes_keep_a_job_alive( $status, $reason, $evidence ) {
+		$database    = new DatabaseManager();
+		$variants    = new VariantRepository( $database );
+		$attachments = new AttachmentRepository( $database, $variants );
+		$job         = $this->jobs->create( 'sync' );
+		$this->jobs->mark_running( $job->get_id() );
+		$this->age( $job->get_id(), 20 * MINUTE_IN_SECONDS );
+		$attachments->assign_job( 850, $job->get_id() );
+		$variants->upsert(
+			array(
+				'attachment_id' => 850,
+				'size_name'     => 'original',
+				'format'        => 'webp',
+				'status'        => $status,
+				'reason'        => $reason,
+			)
+		);
+		$attachments->set_state( 850, AttachmentState::OPTIMIZED );
+
+		$this->assertSame( $evidence ? 0 : 1, count( $this->jobs->find_stale_running( 900 ) ) );
+	}
+
+	public function test_a_claim_older_than_the_recovery_wait_is_no_evidence_and_a_younger_one_is() {
+		global $wpdb;
+
+		$attachments = new AttachmentRepository( new DatabaseManager(), new VariantRepository( new DatabaseManager() ) );
+		$job         = $this->jobs->create( 'sync' );
+		$this->jobs->mark_running( $job->get_id() );
+		$this->age( $job->get_id(), 2 * HOUR_IN_SECONDS );
+		$attachments->assign_job( 851, $job->get_id() );
+		$attachments->claim( 851, AttachmentRepository::SOURCE_QUEUE );
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+		$set   = static function ( $seconds ) use ( $wpdb, $table ) {
+			$wpdb->update( $table, array( 'updated_at' => gmdate( 'Y-m-d H:i:s', time() - $seconds ) ), array( 'attachment_id' => 851 ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		};
+
+		$set( 800 );
+		$this->assertCount( 0, $this->jobs->find_stale_running( 900 ) );
+		$set( 1000 );
+		$this->assertCount( 1, $this->jobs->find_stale_running( 900 ) );
+		$this->assertCount( 0, $this->jobs->find_stale_running( 1800 ), 'A higher threshold also stretches the claim.' );
 	}
 }
