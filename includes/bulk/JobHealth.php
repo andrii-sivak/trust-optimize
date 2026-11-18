@@ -345,8 +345,8 @@ class JobHealth {
 	/**
 	 * Step 2: stop the running jobs that show no life.
 	 *
-	 * A job with neither a producer step nor attempt evidence within the threshold is stopped, except a Resume that has had no chance yet: no work
-	 * finished since it, and either its producer is still scheduled or the queue shows a signal. Such a job is
+	 * A job with neither a producer step nor attempt evidence within the threshold is stopped, except a Resume that has had no chance yet: no
+	 * attempt evidence since it (no claim, no worker change), and either its producer is still scheduled or the queue shows a signal. Such a job is
 	 * waiting for Action Scheduler, and stopping it again would undo the Resume.
 	 *
 	 * @return int Number of jobs stopped.

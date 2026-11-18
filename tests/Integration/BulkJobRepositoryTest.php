@@ -225,14 +225,14 @@ class BulkJobRepositoryTest extends WP_UnitTestCase {
 	 */
 	public static function variant_writes() {
 		return array(
-			'processing'          => array( VariantStatus::PROCESSING, null, true ),
-			'done'                => array( VariantStatus::DONE, null, true ),
-			'skipped'             => array( VariantStatus::SKIPPED, 'no_gain', true ),
-			'failed by a worker'  => array( VariantStatus::FAILED, 'save_failed', true ),
-			'failed, no reason'   => array( VariantStatus::FAILED, null, true ),
-			'pending'             => array( VariantStatus::PENDING, null, false ),
+			'processing'           => array( VariantStatus::PROCESSING, null, true ),
+			'done'                 => array( VariantStatus::DONE, null, true ),
+			'skipped'              => array( VariantStatus::SKIPPED, 'no_gain', true ),
+			'failed by a worker'   => array( VariantStatus::FAILED, 'save_failed', true ),
+			'failed, no reason'    => array( VariantStatus::FAILED, null, true ),
+			'pending'              => array( VariantStatus::PENDING, null, false ),
 			'failed, max_attempts' => array( VariantStatus::FAILED, 'max_attempts', false ),
-			'failed, delete'      => array( VariantStatus::FAILED, 'delete_failed', false ),
+			'failed, delete'       => array( VariantStatus::FAILED, 'delete_failed', false ),
 		);
 	}
 
@@ -274,15 +274,15 @@ class BulkJobRepositoryTest extends WP_UnitTestCase {
 		$this->age( $job->get_id(), 2 * HOUR_IN_SECONDS );
 		$attachments->assign_job( 851, $job->get_id() );
 		$attachments->claim( 851, AttachmentRepository::SOURCE_QUEUE );
-		$set = static function ( $seconds ) use ( $wpdb ) {
-			$wpdb->update( $wpdb->prefix . 'trust_optimize_attachments', array( 'updated_at' => gmdate( 'Y-m-d H:i:s', time() - $seconds ) ), array( 'attachment_id' => 851 ) );
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+		$set   = static function ( $seconds ) use ( $wpdb, $table ) {
+			$wpdb->update( $table, array( 'updated_at' => gmdate( 'Y-m-d H:i:s', time() - $seconds ) ), array( 'attachment_id' => 851 ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		};
 
 		$set( 800 );
 		$this->assertCount( 0, $this->jobs->find_stale_running( 900 ) );
 		$set( 1000 );
 		$this->assertCount( 1, $this->jobs->find_stale_running( 900 ) );
-		$set( 1000 );
 		$this->assertCount( 0, $this->jobs->find_stale_running( 1800 ), 'A higher threshold also stretches the claim.' );
 	}
 }

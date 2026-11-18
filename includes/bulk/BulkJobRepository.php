@@ -393,22 +393,24 @@ class BulkJobRepository {
 	 *
 	 * The one definition of "a worker worked on this job". An attachment counts when it is processing since its claim
 	 * (only claim() stores that state, and its lease writes keep updated_at), or when a worker changed one of its
-	 * variants. The stored state of an attachment is never evidence: the planner, regeneration and cleanup
-	 * rewrite it without any worker. The statuses a worker writes are the ones counted; the death and poison writes
+	 * variants. The attachment row is looked at first: an attempt that ended refreshed it with its closing write,
+	 * and one still running is processing, however old its claim (a sync has no time budget). The stored state of an
+	 * attachment is never evidence: the planner, regeneration and cleanup rewrite it without any worker. The statuses a worker writes are the ones counted; the death and poison writes
 	 * (failed for max_attempts) and cleanup's delete failures are not a worker's, and the planner only writes pending.
 	 *
-	 * @param string $variant_since UTC time a worker's variant change must not predate.
-	 * @param string $claim_since   UTC time a running claim must not predate.
+	 * @param string $variant_since UTC time a worker's variant change must come after.
+	 * @param string $claim_since   UTC time a running claim must come after.
 	 * @return string Prepared condition on the alias "j" of the jobs table.
 	 */
 	private function attempt_evidence( $variant_since, $claim_since ) {
 		global $wpdb;
 
 		return $wpdb->prepare(
-			'EXISTS ( SELECT 1 FROM %i a WHERE a.job_id = j.id AND ( ( a.state = %s AND a.updated_at >= %s ) OR ( a.updated_at >= %s AND EXISTS ( SELECT 1 FROM %i v WHERE v.attachment_id = a.attachment_id AND v.updated_at >= %s AND ( v.status IN ( %s, %s, %s ) OR ( v.status = %s AND ( v.reason IS NULL OR v.reason NOT IN ( %s, %s ) ) ) ) ) ) ) )',
+			'EXISTS ( SELECT 1 FROM %i a WHERE a.job_id = j.id AND ( ( a.state = %s AND a.updated_at > %s ) OR ( ( a.state = %s OR a.updated_at > %s ) AND EXISTS ( SELECT 1 FROM %i v WHERE v.attachment_id = a.attachment_id AND v.updated_at > %s AND ( v.status IN ( %s, %s, %s ) OR ( v.status = %s AND ( v.reason IS NULL OR v.reason NOT IN ( %s, %s ) ) ) ) ) ) ) )',
 			$this->db_manager->get_table_name( 'trust_optimize_attachments' ),
 			AttachmentState::PROCESSING,
 			$claim_since,
+			AttachmentState::PROCESSING,
 			$variant_since,
 			$this->db_manager->get_table_name( 'trust_optimize_variants' ),
 			$variant_since,
