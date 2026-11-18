@@ -190,6 +190,12 @@ class ConversionQueue {
 
 		$result = $this->processor->run( $attachment_id );
 
+		// A file that already used all its attempts is not converted again by a late action; one that no attempt holds is closed here.
+		if ( AttachmentProcessor::ATTEMPTS_EXHAUSTED === $result->get_message() ) {
+			$this->attachments->give_up( $attachment_id );
+			return;
+		}
+
 		// Held by another worker, or the bulk job it belongs to is paused: park it when the job is, and when the park misses
 		// (the job was resumed meanwhile) take the claim once more.
 		if ( AttachmentProcessor::BUSY === $result->get_message() && $result->is_skipped() ) {

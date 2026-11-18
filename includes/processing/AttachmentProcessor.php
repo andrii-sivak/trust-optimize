@@ -48,6 +48,11 @@ class AttachmentProcessor {
 	const ATTEMPT_LOST = 'attempt_lost';
 
 	/**
+	 * Message of a queue run refused because the attachment already used all its attempts.
+	 */
+	const ATTEMPTS_EXHAUSTED = 'attempts_exhausted';
+
+	/**
 	 * Attachment repository.
 	 *
 	 * @var AttachmentRepository
@@ -244,12 +249,19 @@ class AttachmentProcessor {
 	 *
 	 * @param int        $attachment_id Attachment ID.
 	 * @param float|null $budget        Time budget in seconds; null uses the filterable default.
-	 * @return OptimizeResult Data: 'state' (AttachmentState) and 'more' (bool). Skipped as "busy" when the attachment is held or parked, as "attempt_lost" when the attempt was taken away meanwhile.
+	 * @return OptimizeResult Data: 'state' (AttachmentState) and 'more' (bool). Skipped as "busy" when the attachment is held or parked, as "attempts_exhausted" when it already used all its attempts, as "attempt_lost" when the attempt was taken away meanwhile.
 	 */
 	public function run( $attachment_id, $budget = null ) {
 		$token = $this->begin( $attachment_id, AttachmentRepository::SOURCE_QUEUE );
 
 		if ( false === $token ) {
+			$row = $this->attachments->get( $attachment_id );
+
+			// A row that a worker holds is busy whatever its count; any other row at the limit was refused by the count.
+			if ( $row && AttachmentState::PROCESSING !== $row['state'] && $row['attempts'] >= AttachmentRepository::MAX_ATTEMPTS ) {
+				return OptimizeResult::skipped( self::ATTEMPTS_EXHAUSTED, array( 'more' => false ) );
+			}
+
 			return OptimizeResult::skipped( self::BUSY, array( 'more' => false ) );
 		}
 

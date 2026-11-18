@@ -176,6 +176,97 @@ class ConversionQueueTest extends WP_UnitTestCase {
 	}
 
 	/**
+	 * Store an attempt count on a row.
+	 *
+	 * @param int $attachment_id Attachment ID.
+	 * @param int $attempts      Attempts.
+	 */
+	private function set_attempts( $attachment_id, $attempts ) {
+		global $wpdb;
+
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET attempts = %d WHERE attachment_id = %d", $attempts, $attachment_id ) );
+	}
+
+	public function test_a_late_action_on_a_poison_file_converts_and_schedules_nothing() {
+		$id = $this->upload();
+		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+		$this->attachments->set_state( $id, AttachmentState::FAILED, 'max_attempts' );
+		$this->set_attempts( $id, AttachmentRepository::MAX_ATTEMPTS );
+		$row      = $this->attachments->get( $id );
+		$variants = $this->variants->get_for_attachment( $id );
+
+		$this->queue()->process( $id );
+
+		$this->assertSame( $row, $this->attachments->get( $id ) );
+		$this->assertSame( $variants, $this->variants->get_for_attachment( $id ) );
+		$this->assertSame( array(), $this->pending_actions( $id ) );
+	}
+
+	public function test_a_duplicate_action_during_the_third_attempt_leaves_the_attempt_to_its_worker() {
+		$id = $this->upload();
+		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+		$token = $this->attachments->claim( $id, AttachmentRepository::SOURCE_QUEUE );
+		$this->set_attempts( $id, AttachmentRepository::MAX_ATTEMPTS );
+		$row      = $this->attachments->get( $id );
+		$variants = $this->variants->get_for_attachment( $id );
+
+		$this->queue()->process( $id );
+
+		$this->assertSame( $row, $this->attachments->get( $id ), 'Still processing, attempts 3, same token.' );
+		$this->assertSame( $token, $this->attachments->get( $id )['attempt_token'] );
+		$this->assertSame( $variants, $this->variants->get_for_attachment( $id ) );
+		$this->assertSame( array(), $this->pending_actions( $id ) );
+
+		$this->assertTrue( $this->attachments->finish( $id, $token, AttachmentState::OPTIMIZED ), 'The worker\'s closing write lands.' );
+		$this->assertSame( array( AttachmentState::OPTIMIZED, 0 ), array( $this->attachments->get_state( $id ), $this->attachments->get_attempts( $id ) ) );
+	}
+
+	public function test_a_queued_file_with_all_its_attempts_used_is_given_up_by_its_action() {
+		$id = $this->upload();
+		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+		$this->set_attempts( $id, AttachmentRepository::MAX_ATTEMPTS );
+
+		$this->queue()->process( $id );
+
+		$row = $this->attachments->get( $id );
+		$this->assertSame( array( AttachmentState::FAILED, 'max_attempts', 3 ), array( $row['state'], $row['reason'], $row['attempts'] ) );
+		$statuses = array_unique( array_column( $this->variants->get_for_attachment( $id ), 'status' ) );
+		$this->assertSame( array( VariantStatus::FAILED ), $statuses, 'No pending variant is left, so a bulk job can complete.' );
+		$this->assertSame( array(), $this->pending_actions( $id ) );
+	}
+
+	public function test_a_sync_converts_a_file_that_used_all_its_attempts() {
+		$id = $this->upload();
+		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+		$this->attachments->set_state( $id, AttachmentState::FAILED, 'max_attempts' );
+		$this->set_attempts( $id, AttachmentRepository::MAX_ATTEMPTS );
+
+		$result = \TrustOptimize\Core\Plugin::get_instance()->processor->sync( $id );
+
+		$this->assertTrue( $result->is_success() );
+		$this->assertSame( AttachmentState::OPTIMIZED, $this->attachments->get_state( $id ) );
+	}
+
+	public function test_a_replaced_source_gives_a_poison_file_its_attempts_back() {
+		$id = $this->upload();
+		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+		foreach ( $this->variants->get_for_attachment( $id ) as $row ) {
+			$this->variants->transition( $row['id'], VariantStatus::PENDING, VariantStatus::FAILED, array( 'reason' => 'max_attempts', 'source_file_size' => 1 ) );
+		}
+		$this->attachments->set_state( $id, AttachmentState::FAILED, 'max_attempts' );
+		$this->set_attempts( $id, AttachmentRepository::MAX_ATTEMPTS );
+
+		$this->assertTrue( $this->queue()->plan_and_enqueue( $id ) );
+		$this->assertSame( 0, $this->attachments->get_attempts( $id ) );
+		$this->run_queue();
+
+		$this->assertSame( AttachmentState::OPTIMIZED, $this->attachments->get_state( $id ) );
+	}
+
+	/**
 	 * The queue registered by the plugin on boot.
 	 *
 	 * @return ConversionQueue

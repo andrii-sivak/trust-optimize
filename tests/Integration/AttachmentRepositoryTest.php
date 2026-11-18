@@ -188,6 +188,75 @@ class AttachmentRepositoryTest extends WP_UnitTestCase {
 		$this->assertTrue( $this->attachments->mark_queued( 716 ) );
 	}
 
+	/**
+	 * Store an attempt count on a row.
+	 *
+	 * @param int $attachment_id Attachment ID.
+	 * @param int $attempts      Attempts.
+	 */
+	private function set_attempts( $attachment_id, $attempts ) {
+		global $wpdb;
+
+		$table = ( new DatabaseManager() )->get_plugin_table_names()['attachments'];
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+		$wpdb->query( $wpdb->prepare( "UPDATE `{$table}` SET attempts = %d WHERE attachment_id = %d", $attempts, $attachment_id ) );
+	}
+
+	public function test_a_queue_claim_refuses_a_file_that_used_all_its_attempts_and_a_sync_claim_does_not() {
+		$this->attachments->set_state( 760, AttachmentState::FAILED, 'max_attempts' );
+		$this->set_attempts( 760, AttachmentRepository::MAX_ATTEMPTS );
+
+		$this->assertFalse( $this->attachments->claim( 760, AttachmentRepository::SOURCE_QUEUE ) );
+		$this->assertSame( AttachmentState::FAILED, $this->attachments->get_state( 760 ) );
+
+		$this->assertNotFalse( $this->attachments->claim( 760, AttachmentRepository::SOURCE_SYNC ) );
+		$this->assertSame( 1, $this->attachments->get_attempts( 760 ) );
+	}
+
+	public function test_a_queue_claim_still_takes_the_last_attempt() {
+		$this->attachments->set_state( 761, AttachmentState::QUEUED );
+		$this->set_attempts( 761, AttachmentRepository::MAX_ATTEMPTS - 1 );
+
+		$this->assertNotFalse( $this->attachments->claim( 761, AttachmentRepository::SOURCE_QUEUE ) );
+		$this->assertSame( AttachmentRepository::MAX_ATTEMPTS, $this->attachments->get_attempts( 761 ) );
+	}
+
+	public function test_give_up_closes_a_queued_row_at_the_limit_with_its_pending_variants() {
+		$this->attachments->set_state( 762, AttachmentState::QUEUED );
+		$this->set_attempts( 762, AttachmentRepository::MAX_ATTEMPTS );
+		$this->add_variant( 762, 'webp', VariantStatus::PENDING );
+		$this->add_variant( 762, 'avif', VariantStatus::DONE );
+
+		$this->assertTrue( $this->attachments->give_up( 762 ) );
+
+		$row = $this->attachments->get( 762 );
+		$this->assertSame( array( AttachmentState::FAILED, 'max_attempts', 3 ), array( $row['state'], $row['reason'], $row['attempts'] ) );
+		$rows = $this->variants->get_for_attachment( 762 );
+		$this->assertEqualsCanonicalizing( array( VariantStatus::FAILED, VariantStatus::DONE ), array_column( $rows, 'status' ) );
+		$this->assertFalse( $this->attachments->give_up( 762 ), 'A failed row is left as it is.' );
+	}
+
+	public function test_give_up_never_touches_an_attempt_that_holds_the_row() {
+		$token = $this->attachments->claim( 763, AttachmentRepository::SOURCE_QUEUE );
+		$this->set_attempts( 763, AttachmentRepository::MAX_ATTEMPTS );
+		$this->add_variant( 763, 'webp', VariantStatus::PENDING );
+
+		$this->assertFalse( $this->attachments->give_up( 763 ) );
+
+		$row = $this->attachments->get( 763 );
+		$this->assertSame( array( AttachmentState::PROCESSING, $token, 3 ), array( $row['state'], $row['attempt_token'], $row['attempts'] ) );
+		$this->assertSame( VariantStatus::PENDING, $this->variants->get_for_attachment( 763 )[0]['status'] );
+	}
+
+	public function test_give_up_ignores_a_row_below_the_limit() {
+		$this->attachments->set_state( 764, AttachmentState::QUEUED );
+		$this->set_attempts( 764, AttachmentRepository::MAX_ATTEMPTS - 1 );
+
+		$this->assertFalse( $this->attachments->give_up( 764 ) );
+		$this->assertSame( AttachmentState::QUEUED, $this->attachments->get_state( 764 ) );
+	}
+
 	public function test_a_parked_attachment_can_be_queued() {
 		$this->job_of( 717, true );
 		$this->attachments->mark_queued( 717 );
