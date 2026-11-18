@@ -564,10 +564,10 @@ class BulkProducer {
 
 		try {
 			if ( $delay > 0 ) {
-				return 0 !== as_schedule_single_action( time() + $delay, self::HOOK_PRODUCE, array( 'job_id' => (int) $job_id ), ConversionQueue::GROUP );
+				return 0 !== as_schedule_single_action( time() + $delay, self::HOOK_PRODUCE, array( 'job_id' => (int) $job_id ), ConversionQueue::GROUP, false, ConversionQueue::PRIORITY_SERVICE );
 			}
 
-			return 0 !== as_enqueue_async_action( self::HOOK_PRODUCE, array( 'job_id' => (int) $job_id ), ConversionQueue::GROUP );
+			return 0 !== as_enqueue_async_action( self::HOOK_PRODUCE, array( 'job_id' => (int) $job_id ), ConversionQueue::GROUP, false, ConversionQueue::PRIORITY_SERVICE );
 		} catch ( Throwable $throwable ) {
 			return false;
 		}
