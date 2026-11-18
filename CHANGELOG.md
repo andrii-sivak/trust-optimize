@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cancelling a paused job queues its parked attachments, so they are not left behind; a deactivation gives back the attempt of the conversion it interrupted instead of counting it as a death.
 - A file that died three times is not queued again by a bulk run, regeneration or maintenance; an explicit sync, or a changed source file, gives it another chance.
 - A running bulk job was paused as stale after a DST change or a change of the site timezone, and a job that had really stopped could be detected as stale hours late, because job timestamps and the stale threshold used site-local time.
+- `wp trust-optimize sync-attachment` and `remove-attachment` work as documented. WP-CLI registered them as `sync_attachment` and `remove_attachment`; those names no longer exist.
 - The Documentation link on the settings page, the plugin and author URIs and the link in `readme.txt` point to the renamed GitHub account; the old author profile link returned 404.
 
 ### Changed

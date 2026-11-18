@@ -248,6 +248,8 @@ class Command {
 	 * <id>
 	 * : Attachment ID.
 	 *
+	 * @subcommand sync-attachment
+	 *
 	 * @param array $args Positional arguments.
 	 */
 	public function sync_attachment( $args ) {
@@ -272,6 +274,8 @@ class Command {
 	 *
 	 * <id>
 	 * : Attachment ID.
+	 *
+	 * @subcommand remove-attachment
 	 *
 	 * @param array $args Positional arguments.
 	 */
