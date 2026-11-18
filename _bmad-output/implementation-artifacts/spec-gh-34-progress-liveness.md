@@ -2,9 +2,9 @@
 title: 'Job liveness from attempt evidence, slow attempts, AD-5 priorities and the claim poison guard (#34)'
 type: 'bugfix'
 created: '2026-11-18'
-status: 'ready-for-dev'
+status: 'in-review'
 route: ''
-review_loop_iteration: 0
+review_loop_iteration: 1
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-trust-optimize-2026-11-16/ARCHITECTURE-SPINE.md'
 ---
@@ -158,12 +158,12 @@ context:
 ## Tasks & Acceptance
 
 **Execution** (one commit per bullet, refactorings first):
-- [ ] `ConversionQueue.php`, `BulkProducer.php`, `Maintenance.php`, `Lifecycle.php` -- refactor: rename `PRIORITY_RESUMED` to the conversion priority, and add a named service priority 10 passed explicitly; no behavior change.
-- [ ] `ConversionQueue.php` + `ConversionQueueTest`, `BulkProducerTest`, `MaintenanceTest`, `LifecycleTest`, `QueueRecoveryTest` -- every conversion path at 20, service actions at 10, backlog tests (limit + 1 waits, limit queues); CHANGELOG.
-- [ ] `AttachmentRepository.php`, `AttachmentProcessor.php`, `ConversionQueue.php` + `ConversionQueueTest`, `AttachmentRepositoryTest` -- queue claim poison guard and the legacy CAS, tested through `process()`; sync and replaced-source retries; CHANGELOG.
-- [ ] `VariantRepository.php`, `AttachmentRepository.php`, `AttachmentProcessor.php` + tests -- `upsert()` keeps `updated_at` without a status; `finish()` never stores `processing`.
-- [ ] `BulkJobRepository.php`, `JobHealth.php` + `JobHealthTest`, `BulkJobRepositoryTest` -- attempt-evidence predicate (claims over the recovery wait), liveness and progress since Resume, the matrix rows on liveness and re-planning; CHANGELOG.
-- [ ] `JobHealth.php`, `readme.txt` + `JobHealthTest`, `QueueRecoveryTest` -- recovery wait `max( 900, filter )`; readme; CHANGELOG.
+- [x] `ConversionQueue.php`, `BulkProducer.php`, `Maintenance.php`, `Lifecycle.php` -- refactor: rename `PRIORITY_RESUMED` to the conversion priority, and add a named service priority 10 passed explicitly; no behavior change.
+- [x] `ConversionQueue.php` + `ConversionQueueTest`, `BulkProducerTest`, `MaintenanceTest`, `LifecycleTest`, `QueueRecoveryTest` -- every conversion path at 20, service actions at 10, backlog tests (limit + 1 waits, limit queues); CHANGELOG.
+- [x] `AttachmentRepository.php`, `AttachmentProcessor.php`, `ConversionQueue.php` + `ConversionQueueTest`, `AttachmentRepositoryTest` -- queue claim poison guard and the legacy CAS, tested through `process()`; sync and replaced-source retries; CHANGELOG.
+- [x] `VariantRepository.php`, `AttachmentRepository.php`, `AttachmentProcessor.php` + tests -- `upsert()` keeps `updated_at` without a status; `finish()` never stores `processing`.
+- [x] `BulkJobRepository.php`, `JobHealth.php` + `JobHealthTest`, `BulkJobRepositoryTest` -- attempt-evidence predicate (claims over the recovery wait), liveness and progress since Resume, the matrix rows on liveness and re-planning; CHANGELOG.
+- [x] `JobHealth.php`, `readme.txt` + `JobHealthTest`, `QueueRecoveryTest` -- recovery wait `max( 900, filter )`; readme; CHANGELOG.
 
 **Acceptance Criteria:**
 - **Issue scenario.** Given a sync job whose row is older than the threshold, while its 25 conversions keep being claimed and finished, when `admin_init` fires between them on a normal admin page load, then the job stays `running`, and its producer, when it runs, schedules its successor.
@@ -171,6 +171,50 @@ context:
 - **Raised threshold.** Given the filter at 3600 s and a queue attempt claimed 1200 s ago whose AS action is `failed`, when step 1 runs from an admin load, Maintenance and Resume, then the attempt is not recovered and the job is not stopped. Once the claim is 3600 s old, the attempt is recovered only if no AS action is pending or in progress, there is no lease, and the token matches.
 - **Poison through `process()`.** Given X `failed` / `max_attempts` with 3 attempts and an AS action for it, when `ConversionQueue::process()` runs, then nothing is claimed, converted or scheduled, and `attempts` stays 3. When a sync of X runs, or X's source is replaced and re-planned, then X converts.
 - **Third attempt keeps its owner.** Given X `processing` with `attempts` 3 and token T, when a second action runs `ConversionQueue::process()` for X, then nothing is converted or scheduled, and X keeps `processing`, `attempts` 3 and token T. When T's worker then completes, its closing write lands and X ends in its worker state.
+
+
+### Review Findings
+
+Review 1 (code 3b1d2dc..7d84bb9). Layers: blind-hunter (BH), edge-case-hunter (EC), verification-gap (VG), acceptance-auditor (AA).
+
+- [x] [Review][Decision] Variant evidence of a long attempt is lost — resolved by the owner: count variants of a running attempt whatever its claim age (`( a.state = processing OR a.updated_at >= T ) AND EXISTS v`); becomes a patch with a test; Spec Change Log entry. (EC, AA, BH)
+- [x] [Review][Patch] Variant branch counts a running attempt's variants regardless of claim age, plus a test with a claim older than the recovery wait and a fresh variant transition [includes/bulk/BulkJobRepository.php:400]
+- [x] [Review][Decision] The poison refusal closes a queued row of a paused job instead of parking it — resolved by the owner: accept closing (parking would strand the row after Resume); recorded in Implementation Notes and Spec Change Log, plus a test. (AA)
+- [x] [Review][Patch] Test: queued row with 3 attempts in a paused job is closed `failed` / `max_attempts`, not parked [tests/Integration/ConversionQueueTest.php]
+- [x] [Review][Patch] The issue-scenario test passes through the producer's `touch()`, not through attempt evidence; it lacks the successor assertion [tests/Integration/JobHealthTest.php] (VG, AA)
+- [x] [Review][Patch] No test that a claim made after Resume counts as progress since Resume and that the job is then stopped [tests/Integration/JobHealthTest.php] (VG, BH)
+- [x] [Review][Patch] Progress since Resume compares `>=` against `resumed_at`; the #30 design (an accepted risk) relies on a strict `>` at second precision [includes/bulk/BulkJobRepository.php:381] (BH, EC)
+- [x] [Review][Patch] `give_up()` scope: it closes any non-processing, non-failed state (`optimized`, `partial` or `skipped` rewritten by `recompute()`), fails only `pending` variants and leaves an orphan `processing` variant, and its `last_error` is hard-coded to 3 deaths. Narrow it to `queued` and `none`, fail `processing` and `pending` variants as the death CAS does, and write the actual count [includes/storage/AttachmentRepository.php:306-315] (EC, BH)
+- [x] [Review][Patch] readme and CHANGELOG claims [readme.txt:171, CHANGELOG.md]:
+  - "recovered as dead only after this time too" ignores the operator `release`, which keeps 900 s;
+  - the unit is missing in "never less than 900";
+  - "protected from recovery" means protected by the wait;
+  - the sync `up_to_date` failure (REST/CLI now answer failed) has no Fixed entry.
+
+  (EC, BH)
+- [x] [Review][Patch] Stale comment in `JobHealth::stop_stale_jobs()` ("no work finished since it") [includes/bulk/JobHealth.php] (BH)
+- [x] [Review][Patch] `upsert()` refreshes `updated_at` on any status; AD-3 says only on a change to `pending` [includes/storage/VariantRepository.php:113] (BH)
+- [x] [Review][Patch] Test hygiene [tests/Integration]:
+  - pending `HOOK_PROCESS` actions leak (IDs 999998/999999, 860, 862);
+  - "Only recoveries / repairs" lacks park and `give_up()`, and its comment is wrong;
+  - the racing-insert test uses a shape the planner never produces;
+  - `$set( 1000 )` is called twice;
+  - the table name is hard-coded;
+  - the provider alignment is off;
+  - new helpers have no docblocks.
+
+  (BH, AA, VG)
+- [x] [Review][Defer] Cost of the evidence query for a silent large job [includes/bulk/BulkJobRepository.php:400] — deferred: the shape predates #34 (`has_progress_since_resume` scanned the same way); it reads the job's attachments through `job_state` only while the producer is silent; measure with EXPLAIN on the stand before deciding on an index (schema change).
+- [x] [Review][Defer] The queue path maps a derived `processing` to `queued` + `more` and resets attempts, so a permanently failing orphan reset reschedules forever [includes/processing/AttachmentProcessor.php] — deferred: pre-existing; it needs repeated DB errors.
+
+Rejected:
+- EC: job stopped while AS still shows the attempt's action in progress — false: intended; this is the matrix row "Dead worker, no cron" (step 1 cannot recover, the admin load stops the job).
+- EC, BH: a second `run()` after a missed park returning `ATTEMPTS_EXHAUSTED` is not given up — false: unreachable; the first run saw `processing`, which ends by `finish()` (attempts 0) or by the death CAS (`failed`), neither of which `give_up()` takes.
+- EC: `upsert()` with `status` = null — false: no caller passes it.
+- AA, BH: recovery wait computed in two places — low: two copies, both fed by the filter in production; extraction on the third repetition (AGENTS.md).
+- AA: lease and token conditions untested at the raised wait — low: `find_death_candidates()` and the death CAS are unchanged and covered at 900 s by the #30 tests.
+- BH: `give_up()` does not write the job's `last_error` — false: not a death (AD-10 job error is for the death CAS).
+- AA: spec status and checkboxes not updated — handled by this workflow, not a code fix.
 
 ## Design Notes
 
@@ -201,3 +245,32 @@ context:
 - The sync `up_to_date` branch with a variant still `processing` now returns a failed result (`exception`) and ends the attempt `failed` / `exception`.
 - `VariantRepository::upsert()` with no column to update (no status, no other data) writes `id = id` to keep the statement valid.
 - Tests: no separate `QueueRecoveryTest` case was added; recovery at priority 20 is covered by `MaintenanceTest`. The `SchemaPendingTest` priority 20 assertion already existed. Tests that create AS actions leak pending actions into the test database; clean them as AGENTS.md describes.
+- Review 1 (2026-11-18) changes:
+  - **Variant evidence of a running attempt.** It counts whatever its claim age.
+  - **Strict comparisons.** Attempt evidence compares strictly with its moments.
+  - **`give_up()`.** Its scope is limited to `queued` and `none`; it closes orphan `processing` variants too, and its `last_error` reads "The file used all its attempts (N)."
+  - **`upsert()`.** It refreshes `updated_at` only on `pending`.
+  - **Readme and CHANGELOG.** Wording corrected, and a Fixed entry added for the sync `up_to_date` failure.
+  - **Tests.** The issue scenario now runs with no producer action left and asserts that the job row was not refreshed and that the producer schedules its successor. New tests cover:
+    - a long attempt;
+    - a claim before and after the Resume;
+    - work in the same second as the Resume;
+    - park and `give_up()` as non-evidence;
+    - a paused-job poison row;
+    - stored results kept;
+    - the planner insert shape.
+  - **Mutation check.** With evidence disabled, the three new liveness tests fail; with it restored, everything passes.
+  - **Leaks.** No pending `trust-optimize` actions were left in the test database after the full run.
+
+## Spec Change Log
+
+- **Review 1, decision 1 (owner, 2026-11-18).** Finding: `attempt_evidence()` required `a.updated_at >= T` before it looked at variants. A sync attempt has no budget, and a raised `trust_optimize_worker_time_budget` lets an attempt outlive its claim, so a long attempt that kept moving variants left no evidence and its job was stopped mid-work. Amended:
+  - the variant branch reads `( a.state = processing OR a.updated_at > T ) AND EXISTS v`;
+  - the premise "the attachment filter loses nothing" holds only for attempts that ended, which refreshed the row with their closing write.
+
+  Known-bad state avoided: a working job stopped as stale. KEEP: stored attachment state is never evidence, and a running claim counts for the recovery wait.
+- **Review 1, decision 2 (owner, 2026-11-18).** Finding: a queue claim refused by the count also closes a queued row of a paused job. Accepted: such a row is given up as `failed` / `max_attempts` instead of parked. A parked row would be refused by `mark_queued` after Resume and would hold its job open forever. KEEP: the poison compare-and-set never touches a row an attempt holds.
+- **Review 1 patches.**
+  - Attempt evidence compares strictly (`>`), so work in the same second as a Resume is not progress since it.
+  - `give_up()` closes only `queued` or `none` rows without a token. It also fails orphan `processing` variants and records the real count. Stored results (`optimized`, `partial`, `skipped`) are never turned into a failure by the count.
+  - `upsert()` refreshes `updated_at` only on a reset to `pending` (AD-3).
