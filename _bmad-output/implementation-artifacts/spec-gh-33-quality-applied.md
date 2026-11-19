@@ -1,0 +1,99 @@
+---
+title: 'Apply the configured WebP/AVIF quality when saving a variant (#33)'
+type: 'bugfix'
+created: '2026-11-19'
+status: 'ready-for-dev'
+route: ''
+review_loop_iteration: 0
+context:
+  - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-trust-optimize-2026-11-16/ARCHITECTURE-SPINE.md'
+---
+
+<frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
+
+## Intent
+
+**Problem:** The WebP and AVIF quality from the settings, or from `trust_optimize_{format}_quality`, has no effect.
+- `ImageConverter::convert()` calls `set_quality( $q )`, then saves to the target MIME. In WordPress, `WP_Image_Editor::get_output_format()` calls `set_quality()` without an argument whenever the output MIME differs from the source's. The editor then takes the core default for the output MIME through `wp_editor_set_quality`: 86 for WebP, 82 for AVIF.
+- The variant row stores the requested value, so the database claims a quality the file does not have, and staleness, which compares that value with the settings, never notices.
+- Confirmed on 2026-11-19 in PHP-FPM with GD WebP/AVIF and Imagick WebP: settings 30, 60 and 90 all gave files byte-identical to encodes at 86/82.
+
+**Approach:** Around the save of our variant only, a `wp_editor_set_quality` callback returns the requested quality for the target MIME. The callback is removed in `finally`. After the save, the converter reads the quality the editor applied and records a deviation without failing the variant.
+
+## Boundaries & Constraints
+
+**Always:**
+- **Scope of the override.**
+  - The callback is added right before `AtomicImageWriter::write_temporary()` and removed right after it, in `finally`. That covers a `WP_Error` and an exception.
+  - It is added at `PHP_INT_MAX`.
+  - It returns the requested quality only when `$mime_type` equals the target MIME. Otherwise it returns the value it received.
+  - Only that callback instance is removed, and other callbacks on the filter are left alone.
+- **Explicit quality first.** `set_quality( $quality )` is still called before the save.
+  - When it returns `WP_Error`, the variant fails with reason `quality_failed` and the error message (owner decision). Nothing is encoded, a path this run reserved is released, and the override is never added.
+  - Why: on Imagick, a failed `setImageCompressionQuality()` leaves the editor reporting the requested value while the encoder keeps the old one.
+- **What the row means.**
+  - `quality` stays the settings quality the variant was made for. It is the AD-14 staleness key, and `is_stale()`, `count_outdated()` and the planner are unchanged.
+  - After a successful save the converter reads `$editor->get_quality()`. When it equals the request, the `done` row's reason is NULL, as today. When it differs, the `done` row's reason is `quality_applied:<n>` (owner decision: no new column, and visible only in the database for now, with no new UI).
+  - A deviation never fails, skips or re-plans the variant, so a later sync with the same settings answers `up_to_date`.
+- **Skipped variants.** A `skipped` / `not_smaller` row keeps that reason. Its file is deleted, and no deviation is recorded.
+- **Every conversion path** (upload queue, bulk, REST and WP-CLI sync) goes through `ImageConverter::convert()`. The fix changes that path in place, with no parallel old implementation.
+- **CHANGELOG** `[Unreleased]` → Fixed, in the same commits.
+  - The configured WebP/AVIF quality is now applied. Before, WordPress replaced it with its own default, usually 86 (WebP) and 82 (AVIF), since a third-party `wp_editor_set_quality` filter could change that default. The variant rows meanwhile showed the configured value.
+  - Existing variants are not re-encoded automatically and still look current. To apply the quality to them, remove their variants and convert again.
+  - Files can get larger when the configured quality is above those defaults.
+
+**Never:**
+- Change WordPress core, subclass or replace its editors in plugin code, or encode with GD or Imagick directly.
+- Keep the override registered outside our save, or remove callbacks that are not ours.
+- Reject a successful encode because of the applied quality.
+- Migrate stored quality, mark existing variants outdated, or start reprocessing on install or update. The installs are test sites, and the owner reprocesses old variants separately.
+- Touch originals or files without confirmed ownership (AD-13).
+- Add a setting, a public hook, a schema change or general logging. AVIF speed (`heic:speed`), resource gate, pace and unrelated refactoring are out of scope.
+
+## I/O & Edge-Case Matrix
+
+| Scenario | Input / State | Expected | Error handling |
+|---|---|---|---|
+| Quality applied | WebP or AVIF, GD or Imagick (where the runtime can write it), test fixture, settings 30, then 90 | two different files; for this fixture the 30 one is smaller (a property of the fixture, not a general rule); the row has quality 30, then 90, reason NULL | — |
+| Filter quality | `trust_optimize_webp_quality` returns 40 | encoded and recorded at 40 | — |
+| Override gone after success | a conversion finished | the original behavior is back: `wp_editor_set_quality` gives, for each MIME, what it gave before the conversion, and a later core save without an explicit quality gets the same quality as one made before the conversion | — |
+| Override gone after an error | the save returns `WP_Error`, or an exception is thrown inside the save | same as the row above | variant `failed` as today; the exception propagates |
+| Third-party callback | a callback on `wp_editor_set_quality` (default priority and `PHP_INT_MAX`) was registered before | it is still registered afterwards, and the filter's results and core saves match those from before the conversion | — |
+| Isolated defaults | a test that removes every other callback from `wp_editor_set_quality` | after the conversion, a core save gets 86 for WebP and 82 for AVIF; literal defaults appear only in this test | — |
+| Other MIME during our save | the filter is asked for `image/jpeg` while our save runs | the value passes through unchanged | — |
+| Deviation | the editor applies 77 where 30 was requested | `done`, file published, quality 30, reason `quality_applied:77`; the next sync gives `up_to_date` | — |
+| `set_quality` error | the editor returns `WP_Error` for the requested value | `failed` / `quality_failed`, no file, reserved path released, no override registered | — |
+| Not smaller | the output is not smaller than the source | `skipped` / `not_smaller` with the requested quality (as today) | — |
+
+</frozen-after-approval>
+
+## Code Map
+
+- `includes/features/optimization/ImageConverter.php`:
+  - `convert()`: l.120 quality, l.133 `set_quality`, l.140 `write_temporary`, l.156 `skipped` row, l.200-214 `done` row.
+  - `fail()` (l.258) releases the reserved path.
+- `includes/files/AtomicImageWriter.php:46-75` -- `write_temporary()`, the only `save()` call. Unchanged.
+- `includes/settings/OptimizationSettings.php:72-91,164-172` -- requested quality and staleness. Unchanged.
+- `includes/storage/VariantRepository.php:446-475` -- `count_outdated()`. Unchanged.
+- `tests/Integration/ImageConverterTest.php` -- `settings()` helper at l.113; quality assertions at l.148 and l.400.
+- Core references (WP 7.1.2): `class-wp-image-editor.php` `get_output_format()` l.410-419, `set_quality()` l.242-305, `get_default_quality()` l.317-329.
+
+## Tasks & Acceptance
+
+**Execution** (one commit per bullet):
+- [ ] `ImageConverter.php` + `ImageConverterTest` -- scoped override around `write_temporary()`, `quality_failed` on a `set_quality()` error; tests for the matrix rows on quality and override lifetime, per available editor × format via a test-only `wp_image_editors` list, skipped where the runtime cannot write the format; CHANGELOG.
+- [ ] `ImageConverter.php` + `ImageConverterTest` -- applied quality read after the save, `quality_applied:<n>` on a deviating `done` row (test editor subclass), and the next sync gives `up_to_date`; CHANGELOG.
+
+**Acceptance Criteria:**
+- Given each editor and format the test runtime can write, when the test fixture is converted with quality 30 and with 90, then the files differ, and each row records its request. For this fixture the 30 file is also smaller, which is checked as a property of the fixture, not as a general rule. On `main` this test fails.
+- Given any outcome of `convert()` (done, skipped, failed, an exception), when it returns or throws, then `wp_editor_set_quality` behaves as before the conversion, third-party callbacks included.
+
+## Verification
+
+**Commands:**
+- `tools/bin/composer phpcs` -- expected: clean.
+- `tools/bin/test unit 8.0` and `tools/bin/test unit 8.5` -- expected: pass.
+- `tools/bin/test integration 8.0 7.0` and `tools/bin/test integration 8.5 latest` -- expected: pass. Imagick AVIF is covered in both images, and GD AVIF only on 8.5.
+
+**Manual checks:**
+- On the test site, PHP-FPM: sync one test image at two qualities. The variant sizes differ, and the rows record the requests. Then remove the test image.
