@@ -101,6 +101,13 @@ context:
 - Every run used a per-run `docker run` wrapper with the tools image and the stand's network and volumes. Limits: 1–2 GB with no swap, 256 PIDs, a `timeout`. Its limits were checked on synthetic load first. The shared `docker-compose.yml` was not changed.
 - The test database held one leaked pending `trust_optimize_restore_queue` action from 2026-11-18. It caused 14 queue-signal failures in the 8.5 integration run. It was removed with the AGENTS.md command, and the run was repeated.
 
+- Stand check, 2026-11-19 (owner in wp-admin):
+  - **Build.** `scripts/build-release.sh` timed out in `composer install` (slow network), so the stand copy `../trust-optimize` got `git archive` of 40cc1e1 over the #34 build. That is equivalent: `composer.lock` was unchanged, no class was added, and only `ImageConverter.php`, `readme.txt` and `CHANGELOG.md` differed. Backups: stand `backups/*before-gh33-20261119-2305*`.
+  - **Quality 30, CLI.** Owner upload `test_1.jpg` (ID 272, 403 938 B); the queue converted it in the cron container (CLI, GD). The original's WebP (59 724 B) and AVIF (33 940 B) are byte-identical to GD encodes at 30, not at 86/82 (164 134 / 188 246 B). Rows: quality 30, reason NULL.
+  - **Quality 90, PHP-FPM.** `POST /image/272/sync` from wp-admin answered `optimized`. The original's WebP (Imagick, 204 844 B) and AVIF (GD, 295 510 B) are byte-identical to WordPress editor encodes at 90, not at 86/82. Rows: quality 90, reason NULL. The smaller sizes became `skipped` / `not_smaller` at 90, and their quality-30 files were removed, as before #33.
+  - **Repeat.** A second sync answered `up_to_date`: same hashes and variant timestamps, no new `debug.log` lines.
+  - **Cleanup.** The test image and its variants were deleted, and the settings went back to 85/78. The stand keeps running the #33 build.
+
 ## Review Triage Log
 
 Review 1 (diff c14c7f8..5db2bcf). Layers: blind-hunter (BH), edge-case-hunter (EC), verification-gap (VG).
