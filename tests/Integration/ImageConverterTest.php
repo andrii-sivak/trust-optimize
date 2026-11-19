@@ -6,11 +6,13 @@
  */
 
 use TrustOptimize\Capabilities\CapabilityService;
+use TrustOptimize\Core\Plugin;
 use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Domain\VariantStatus;
 use TrustOptimize\Features\Optimization\ImageConverter;
 use TrustOptimize\Files\AtomicImageWriter;
 use TrustOptimize\Files\FileOwnership;
+use TrustOptimize\Queue\ConversionQueue;
 use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Settings\OptimizationSettings;
 use TrustOptimize\Storage\AttachmentRepository;
@@ -48,6 +50,15 @@ class TrustOptimizeTestErroringEditor extends WP_Image_Editor_GD {
 class TrustOptimizeTestThrowingEditor extends WP_Image_Editor_GD {
 	public function save( $destfilename = null, $mime_type = null ) {
 		throw new RuntimeException( 'boom' );
+	}
+}
+
+/**
+ * GD editor that encodes with 77 whatever quality it is asked for.
+ */
+class TrustOptimizeTestDeviatingEditor extends WP_Image_Editor_GD {
+	public function set_quality( $quality = null, $dims = array() ) {
+		return parent::set_quality( 77, $dims );
 	}
 }
 
@@ -471,6 +482,35 @@ class ImageConverterTest extends WP_UnitTestCase {
 		$this->assertNull( $after['relative_path'] );
 		$this->assertFileDoesNotExist( $this->dir . '/r.jpg.webp' );
 		$this->assertSame( 1234, apply_filters( 'wp_editor_set_quality', 1234, 'image/webp' ), 'No override is left behind.' );
+	}
+
+	public function test_a_deviating_editor_is_recorded_and_the_next_sync_has_nothing_to_do() {
+		update_option( 'trust_optimize_options', array( 'convert_to_webp' => 1, 'convert_to_avif' => 0, 'webp_quality' => 30 ) );
+		$id = self::factory()->attachment->create_upload_object( DIR_TESTDATA . '/images/canola.jpg' );
+		// The upload hook has already planned and queued it: start from a clean slate.
+		ConversionQueue::cancel_tasks_for_attachment( $id );
+		$this->variants->delete_for_attachment( $id );
+		$this->attachments->delete( $id );
+
+		add_filter(
+			'wp_image_editors',
+			static function () {
+				return array( 'TrustOptimizeTestDeviatingEditor' );
+			}
+		);
+
+		$result = Plugin::get_instance()->processor->sync( $id );
+
+		$this->assertTrue( $result->is_success(), wp_json_encode( $result->to_array() ) );
+		$rows = $this->variants->get_for_attachment( $id );
+		$this->assertNotEmpty( $rows );
+		foreach ( $rows as $row ) {
+			$this->assertSame( VariantStatus::DONE, $row['status'], $row['size_name'] );
+			$this->assertSame( 30, $row['quality'], 'The row keeps the requested quality.' );
+			$this->assertSame( 'quality_applied:77', $row['reason'], 'The row says which quality the editor applied.' );
+		}
+
+		$this->assertSame( 'up_to_date', Plugin::get_instance()->processor->sync( $id )->get_message(), 'A deviation does not make the variant stale.' );
 	}
 
 	public function test_missing_source_fails_with_reason() {

@@ -149,7 +149,11 @@ class ImageConverter {
 			return $this->fail( $id, $token, $this->failure_reason( $saved ), $saved->get_error_message(), $claimed, $source_size );
 		}
 
-		$file_size = (int) wp_filesize( $saved['path'] );
+		// The row keeps the requested quality, which is what staleness compares with the settings. When the editor
+		// encoded with another value anyway, the reason says so; the variant stays done and is not planned again.
+		$applied      = (int) $editor->get_quality();
+		$quality_note = $applied === $quality ? null : 'quality_applied:' . $applied;
+		$file_size    = (int) wp_filesize( $saved['path'] );
 
 		if ( $file_size >= $source_size ) {
 			$skipped = $this->variants->transition(
@@ -215,7 +219,7 @@ class ImageConverter {
 				'file_size'        => $file_size,
 				'source_file_size' => $source_size,
 				'file_hash'        => (string) hash_file( 'sha256', $saved['path'] ),
-				'reason'           => null,
+				'reason'           => $quality_note,
 			),
 			$token
 		);
