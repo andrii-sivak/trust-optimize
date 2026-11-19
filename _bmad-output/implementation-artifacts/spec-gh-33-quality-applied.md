@@ -2,7 +2,8 @@
 title: 'Apply the configured WebP/AVIF quality when saving a variant (#33)'
 type: 'bugfix'
 created: '2026-11-19'
-status: 'ready-for-dev'
+status: 'in-progress'
+baseline_commit: 'c14c7f882c727ab505fbb28d77c961de6855e4d2'
 route: ''
 review_loop_iteration: 0
 context:
@@ -81,12 +82,24 @@ context:
 ## Tasks & Acceptance
 
 **Execution** (one commit per bullet):
-- [ ] `ImageConverter.php` + `ImageConverterTest` -- scoped override around `write_temporary()`, `quality_failed` on a `set_quality()` error; tests for the matrix rows on quality and override lifetime, per available editor × format via a test-only `wp_image_editors` list, skipped where the runtime cannot write the format; CHANGELOG.
-- [ ] `ImageConverter.php` + `ImageConverterTest` -- applied quality read after the save, `quality_applied:<n>` on a deviating `done` row (test editor subclass), and the next sync gives `up_to_date`; CHANGELOG.
+- [x] `ImageConverter.php` + `ImageConverterTest` -- scoped override around `write_temporary()`, `quality_failed` on a `set_quality()` error; tests for the matrix rows on quality and override lifetime, per available editor × format via a test-only `wp_image_editors` list, skipped where the runtime cannot write the format; CHANGELOG.
+- [x] `ImageConverter.php` + `ImageConverterTest` -- applied quality read after the save, `quality_applied:<n>` on a deviating `done` row (test editor subclass), and the next sync gives `up_to_date`; CHANGELOG.
 
 **Acceptance Criteria:**
 - Given each editor and format the test runtime can write, when the test fixture is converted with quality 30 and with 90, then the files differ, and each row records its request. For this fixture the 30 file is also smaller, which is checked as a property of the fixture, not as a general rule. On `main` this test fails.
 - Given any outcome of `convert()` (done, skipped, failed, an exception), when it returns or throws, then `wp_editor_set_quality` behaves as before the conversion, third-party callbacks included.
+
+## Implementation Notes
+
+- Commits: 61ed8f9 (task 1: override around `write_temporary()`, `quality_failed`), 901b624 (task 2: `quality_applied:<n>`), 205f992 (tests: the filtered quality comes from `OptimizationSettings::from_options()`, the skipped row records its quality).
+- The applied quality is read with `$editor->get_quality()` right after the save, before the not-smaller branch. Only the `done` write uses it. A `skipped` row keeps `not_smaller`.
+- Incident, 2026-11-19: a first draft of `test_the_override_passes_other_mime_types_through` had a spy on `wp_editor_set_quality` that fired the same hook, which is unbounded recursion. wp-phpunit defines `WP_MEMORY_LIMIT` as -1, and the tools containers have no memory limit, so two full `ImageConverterTest` runs exhausted host memory (8.5 GB). Now the spy only records calls. The other-MIME check runs from `image_save_progressive`, which GD fires inside the save while the override is in force.
+- Two draft test bugs were fixed:
+  - the erroring and throwing editors collided on one attachment ID;
+  - the refusing editor also refused the default quality `load()` resolves, which gave `no_editor`.
+- Red checks: with `main`'s converter, all four editor × format cases fail with "Quality 30 and 90 must give different files" (Imagick AVIF included). With task 1 only, the deviation test fails on the reason.
+- Every run used a per-run `docker run` wrapper with the tools image and the stand's network and volumes. Limits: 1–2 GB with no swap, 256 PIDs, a `timeout`. Its limits were checked on synthetic load first. The shared `docker-compose.yml` was not changed.
+- The test database held one leaked pending `trust_optimize_restore_queue` action from 2026-11-18. It caused 14 queue-signal failures in the 8.5 integration run. It was removed with the AGENTS.md command, and the run was repeated.
 
 ## Verification
 
