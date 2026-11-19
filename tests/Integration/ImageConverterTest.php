@@ -5,16 +5,63 @@
  * @package TrustOptimize\Tests
  */
 
+use TrustOptimize\Admin\Settings;
 use TrustOptimize\Capabilities\CapabilityService;
+use TrustOptimize\Core\Plugin;
 use TrustOptimize\Database\DatabaseManager;
 use TrustOptimize\Domain\VariantStatus;
 use TrustOptimize\Features\Optimization\ImageConverter;
 use TrustOptimize\Files\AtomicImageWriter;
 use TrustOptimize\Files\FileOwnership;
+use TrustOptimize\Queue\ConversionQueue;
 use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Settings\OptimizationSettings;
 use TrustOptimize\Storage\AttachmentRepository;
 use TrustOptimize\Storage\VariantRepository;
+
+require_once ABSPATH . 'wp-includes/class-wp-image-editor.php';
+require_once ABSPATH . 'wp-includes/class-wp-image-editor-gd.php';
+require_once ABSPATH . 'wp-includes/class-wp-image-editor-imagick.php';
+
+/**
+ * GD editor that refuses an explicit quality; the default it resolves while loading is accepted.
+ */
+class TrustOptimizeTestRefusingEditor extends WP_Image_Editor_GD {
+	public function set_quality( $quality = null, $dims = array() ) {
+		if ( null === $quality ) {
+			return parent::set_quality( $quality, $dims );
+		}
+
+		return new WP_Error( 'test_refused', 'The editor refuses this quality.' );
+	}
+}
+
+/**
+ * GD editor whose save returns an error.
+ */
+class TrustOptimizeTestErroringEditor extends WP_Image_Editor_GD {
+	public function save( $destfilename = null, $mime_type = null ) {
+		return new WP_Error( 'test_save_failed', 'The save failed.' );
+	}
+}
+
+/**
+ * GD editor that throws while saving.
+ */
+class TrustOptimizeTestThrowingEditor extends WP_Image_Editor_GD {
+	public function save( $destfilename = null, $mime_type = null ) {
+		throw new RuntimeException( 'boom' );
+	}
+}
+
+/**
+ * GD editor that encodes with 77 whatever quality it is asked for.
+ */
+class TrustOptimizeTestDeviatingEditor extends WP_Image_Editor_GD {
+	public function set_quality( $quality = null, $dims = array() ) {
+		return parent::set_quality( 77, $dims );
+	}
+}
 
 /**
  * @covers \TrustOptimize\Features\Optimization\ImageConverter
@@ -200,8 +247,302 @@ class ImageConverterTest extends WP_UnitTestCase {
 		$after = $this->variants->get_for_attachment( 905 )[0];
 		$this->assertSame( VariantStatus::SKIPPED, $after['status'] );
 		$this->assertSame( 'not_smaller', $after['reason'] );
+		$this->assertSame( 100, $after['quality'], 'A skipped row records the requested quality.' );
 		$this->assertNull( $after['relative_path'] );
 		$this->assertFileDoesNotExist( $this->dir . '/noise.jpg.webp' );
+	}
+
+	/**
+	 * Editor and format pairs the runtime can write.
+	 *
+	 * @return array
+	 */
+	public static function editor_format_provider() {
+		$cases = array();
+		foreach ( array( 'WP_Image_Editor_GD', 'WP_Image_Editor_Imagick' ) as $editor ) {
+			foreach ( array( 'webp', 'avif' ) as $format ) {
+				$cases[ "$editor $format" ] = array( $editor, $format );
+			}
+		}
+
+		return $cases;
+	}
+
+	/**
+	 * Offer WordPress only the given editor class.
+	 */
+	private function only_editor( $class ) {
+		add_filter(
+			'wp_image_editors',
+			static function () use ( $class ) {
+				return array( $class );
+			}
+		);
+	}
+
+	/**
+	 * Make the given editor the only one WordPress offers, or skip when it cannot write the format.
+	 */
+	private function use_editor( $editor, $format ) {
+		if ( ! class_exists( $editor ) || ! $editor::test() || ! $editor::supports_mime_type( 'image/' . $format ) ) {
+			$this->markTestSkipped( "$editor cannot write $format here." );
+		}
+
+		$this->only_editor( $editor );
+	}
+
+	private function quality_settings( $format, $quality ) {
+		return new OptimizationSettings( array( $format ), array( $format ), array( $format => $quality ) );
+	}
+
+	/**
+	 * What the quality filter and a core save without an explicit quality give right now.
+	 *
+	 * @return array
+	 */
+	private function core_quality_behaviour() {
+		$out = array();
+		foreach ( array( 'image/webp', 'image/avif', 'image/jpeg' ) as $mime ) {
+			$out[ $mime ] = apply_filters( 'wp_editor_set_quality', 55, $mime );
+		}
+
+		$source = $this->dir . '/core-source.jpg';
+		$im     = imagecreatetruecolor( 200, 120 );
+		imagejpeg( $im, $source, 95 );
+		$editor = wp_get_image_editor( $source );
+		$this->assertNotWPError( $editor );
+		$saved  = $editor->save( $this->dir . '/core-out.webp', 'image/webp' );
+		$out['saved_quality'] = $editor->get_quality();
+		$out['saved_hash']    = is_wp_error( $saved ) ? $saved->get_error_code() : md5_file( $saved['path'] );
+
+		return $out;
+	}
+
+	/**
+	 * @dataProvider editor_format_provider
+	 */
+	public function test_the_configured_quality_is_applied_to_the_file( $editor, $format ) {
+		$this->use_editor( $editor, $format );
+
+		$low  = $this->source( 'q30.jpg', 'jpg', 930, $format );
+		$this->assertTrue( $this->convert_row( $this->converter, $low, $this->quality_settings( $format, 30 ) )->is_success() );
+		$path    = $this->dir . '/q30.jpg.' . $format;
+		$low_row = $this->variants->get_for_attachment( 930 )[0];
+		$low_hash = md5_file( $path );
+
+		$high = $this->source( 'q90.jpg', 'jpg', 931, $format );
+		$result = $this->convert_row( $this->converter, $high, $this->quality_settings( $format, 90 ) );
+		$this->assertTrue( $result->is_success(), wp_json_encode( $result->to_array() ) );
+		$high_row = $this->variants->get_for_attachment( 931 )[0];
+
+		$this->assertSame( 30, $low_row['quality'] );
+		$this->assertNull( $low_row['reason'] );
+		$this->assertSame( 90, $high_row['quality'] );
+		$this->assertNull( $high_row['reason'] );
+		$this->assertNotSame( $low_hash, md5_file( $this->dir . '/q90.jpg.' . $format ), 'Quality 30 and 90 must give different files.' );
+		$this->assertLessThan( (int) $high_row['file_size'], (int) $low_row['file_size'], 'For this fixture the lower quality is smaller.' );
+	}
+
+	public function test_a_filtered_quality_is_encoded_and_recorded() {
+		$this->use_editor( 'WP_Image_Editor_GD', 'webp' );
+		add_filter(
+			'trust_optimize_webp_quality',
+			static function () {
+				return 40;
+			}
+		);
+		// The settings come from the stored options through the plugin's filter, as the worker builds them.
+		$settings = OptimizationSettings::from_options( new Settings(), $this->capabilities );
+		$this->assertSame( 40, $settings->quality_for( 'webp' ) );
+
+		$this->assertTrue( $this->convert_row( $this->converter, $this->source( 'f.jpg', 'jpg', 932 ), $settings )->is_success() );
+		$forty = md5_file( $this->dir . '/f.jpg.webp' );
+		$this->assertSame( 40, $this->variants->get_for_attachment( 932 )[0]['quality'] );
+
+		$this->assertTrue( $this->convert_row( $this->converter, $this->source( 'f2.jpg', 'jpg', 933 ), $this->quality_settings( 'webp', 90 ) )->is_success() );
+		$this->assertNotSame( $forty, md5_file( $this->dir . '/f2.jpg.webp' ), 'The filtered quality reached the encoder.' );
+	}
+
+	public function test_the_override_is_gone_after_a_conversion_and_third_party_callbacks_stay() {
+		$this->use_editor( 'WP_Image_Editor_GD', 'webp' );
+		$default_cb = static function ( $quality ) {
+			return $quality;
+		};
+		$late_cb    = static function ( $quality, $mime ) {
+			return 'image/webp' === $mime ? 71 : $quality;
+		};
+		add_filter( 'wp_editor_set_quality', $default_cb, 10, 2 );
+		add_filter( 'wp_editor_set_quality', $late_cb, PHP_INT_MAX, 2 );
+		$before = $this->core_quality_behaviour();
+
+		$this->assertTrue( $this->convert_row( $this->converter, $this->source( 'o.jpg', 'jpg', 934 ), $this->quality_settings( 'webp', 30 ) )->is_success() );
+
+		$row = $this->variants->get_for_attachment( 934 )[0];
+		$this->assertSame( 30, $row['quality'], 'The override wins over a later third-party callback during the save.' );
+		$this->assertNull( $row['reason'] );
+		$this->assertSame( 10, has_filter( 'wp_editor_set_quality', $default_cb ) );
+		$this->assertSame( PHP_INT_MAX, has_filter( 'wp_editor_set_quality', $late_cb ) );
+		$this->assertSame( $before, $this->core_quality_behaviour() );
+	}
+
+	public function test_the_override_is_gone_after_a_variant_that_is_not_smaller() {
+		$this->use_editor( 'WP_Image_Editor_GD', 'webp' );
+		$before = $this->core_quality_behaviour();
+
+		$im = imagecreatetruecolor( 64, 64 );
+		for ( $x = 0; $x < 64; $x++ ) {
+			for ( $y = 0; $y < 64; $y++ ) {
+				imagesetpixel( $im, $x, $y, imagecolorallocate( $im, wp_rand( 0, 255 ), wp_rand( 0, 255 ), wp_rand( 0, 255 ) ) );
+			}
+		}
+		imagejpeg( $im, $this->dir . '/n.jpg', 5 );
+		$this->variants->upsert(
+			array(
+				'attachment_id'        => 940,
+				'size_name'            => 'original',
+				'format'               => 'webp',
+				'source_relative_path' => $this->relative_dir . '/n.jpg',
+			)
+		);
+
+		$result = $this->convert_row( $this->converter, $this->variants->get_for_attachment( 940 )[0], $this->quality_settings( 'webp', 100 ) );
+
+		$this->assertTrue( $result->is_skipped() );
+		$this->assertSame( 'not_smaller', $this->variants->get_for_attachment( 940 )[0]['reason'] );
+		$this->assertSame( $before, $this->core_quality_behaviour() );
+	}
+
+	public function test_the_override_is_gone_after_a_failed_save_and_an_exception() {
+		$this->use_editor( 'WP_Image_Editor_GD', 'webp' );
+		$before = $this->core_quality_behaviour();
+
+		$cases = array(
+			array( 'TrustOptimizeTestErroringEditor', null, 935 ),
+			array( 'TrustOptimizeTestThrowingEditor', 'boom', 936 ),
+		);
+
+		foreach ( $cases as list( $editor, $exception, $id ) ) {
+			remove_all_filters( 'wp_image_editors' );
+			$this->only_editor( $editor );
+			$row = $this->source( 'e' . $id . '.jpg', 'jpg', $id );
+
+			if ( null === $exception ) {
+				$this->assertTrue( $this->convert_row( $this->converter, $row, $this->quality_settings( 'webp', 30 ) )->is_failed() );
+				$this->assertSame( 'save_failed', $this->variants->get_for_attachment( $id )[0]['reason'] );
+			} else {
+				try {
+					$this->convert_row( $this->converter, $row, $this->quality_settings( 'webp', 30 ) );
+					$this->fail( 'The exception must propagate.' );
+				} catch ( RuntimeException $e ) {
+					$this->assertSame( $exception, $e->getMessage() );
+				}
+			}
+
+			remove_all_filters( 'wp_image_editors' );
+			$this->use_editor( 'WP_Image_Editor_GD', 'webp' );
+			$this->assertSame( $before, $this->core_quality_behaviour(), "After $editor" );
+		}
+	}
+
+	public function test_core_defaults_return_when_no_other_callback_is_registered() {
+		$this->use_editor( 'WP_Image_Editor_GD', 'webp' );
+		remove_all_filters( 'wp_editor_set_quality' );
+
+		$this->assertTrue( $this->convert_row( $this->converter, $this->source( 'd.jpg', 'jpg', 937 ), $this->quality_settings( 'webp', 30 ) )->is_success() );
+
+		$source = $this->dir . '/d.jpg';
+		foreach ( array( 'webp' => 86, 'avif' => 82 ) as $format => $default ) {
+			$editor = wp_get_image_editor( $source );
+			$this->assertNotWPError( $editor );
+			if ( ! $editor::supports_mime_type( 'image/' . $format ) ) {
+				continue;
+			}
+			$editor->save( $this->dir . '/core.' . $format, 'image/' . $format );
+			$this->assertSame( $default, $editor->get_quality(), "A core save of $format gets the core default." );
+		}
+	}
+
+	public function test_the_override_passes_other_mime_types_through() {
+		$this->use_editor( 'WP_Image_Editor_GD', 'webp' );
+
+		// The spy only records the calls core makes; it never fires the hook it is attached to.
+		$calls = array();
+		$spy   = static function ( $quality, $mime ) use ( &$calls ) {
+			$calls[] = $mime;
+			return $quality;
+		};
+		add_filter( 'wp_editor_set_quality', $spy, 10, 2 );
+
+		// GD fires image_save_progressive inside save(), after the output format was resolved, while the override is
+		// in force: ask the quality filter from there, through another hook, for the target and for another MIME.
+		$during = array();
+		$probe  = static function ( $interlace, $mime ) use ( &$during ) {
+			$during[ $mime ] = array(
+				'target' => apply_filters( 'wp_editor_set_quality', 12, 'image/webp' ),
+				'other'  => apply_filters( 'wp_editor_set_quality', 12, 'image/jpeg' ),
+			);
+			return $interlace;
+		};
+		add_filter( 'image_save_progressive', $probe, 10, 2 );
+
+		$this->assertTrue( $this->convert_row( $this->converter, $this->source( 'm.jpg', 'jpg', 938 ), $this->quality_settings( 'webp', 30 ) )->is_success() );
+
+		$this->assertContains( 'image/webp', $calls, 'Core resolved the quality for the target MIME during the save.' );
+		$this->assertSame(
+			array(
+				'image/webp' => array(
+					'target' => 30,
+					'other'  => 12,
+				),
+			),
+			$during,
+			'Inside the save the override answers for the target MIME only.'
+		);
+	}
+
+	public function test_an_editor_that_refuses_the_quality_fails_the_variant_and_frees_the_path() {
+		$this->use_editor( 'WP_Image_Editor_GD', 'webp' );
+		remove_all_filters( 'wp_image_editors' );
+		$this->only_editor( 'TrustOptimizeTestRefusingEditor' );
+		$row = $this->source( 'r.jpg', 'jpg', 939 );
+
+		$result = $this->convert_row( $this->converter, $row, $this->quality_settings( 'webp', 30 ) );
+
+		$this->assertTrue( $result->is_failed() );
+		$after = $this->variants->get_for_attachment( 939 )[0];
+		$this->assertSame( VariantStatus::FAILED, $after['status'] );
+		$this->assertSame( 'quality_failed', $after['reason'] );
+		$this->assertNull( $after['relative_path'] );
+		$this->assertFileDoesNotExist( $this->dir . '/r.jpg.webp' );
+		$this->assertSame( 1234, apply_filters( 'wp_editor_set_quality', 1234, 'image/webp' ), 'No override is left behind.' );
+	}
+
+	public function test_a_deviating_editor_is_recorded_and_the_next_sync_has_nothing_to_do() {
+		if ( ! WP_Image_Editor_GD::test() || ! WP_Image_Editor_GD::supports_mime_type( 'image/webp' ) ) {
+			$this->markTestSkipped( 'GD cannot write webp here.' );
+		}
+
+		update_option( 'trust_optimize_options', array( 'convert_to_webp' => 1, 'convert_to_avif' => 0, 'webp_quality' => 30 ) );
+		$id = self::factory()->attachment->create_upload_object( DIR_TESTDATA . '/images/canola.jpg' );
+		// The upload hook has already planned and queued it: start from a clean slate.
+		ConversionQueue::cancel_tasks_for_attachment( $id );
+		$this->variants->delete_for_attachment( $id );
+		$this->attachments->delete( $id );
+
+		$this->only_editor( 'TrustOptimizeTestDeviatingEditor' );
+
+		$result = Plugin::get_instance()->processor->sync( $id );
+
+		$this->assertTrue( $result->is_success(), wp_json_encode( $result->to_array() ) );
+		$rows = $this->variants->get_for_attachment( $id );
+		$this->assertNotEmpty( $rows );
+		foreach ( $rows as $row ) {
+			$this->assertSame( VariantStatus::DONE, $row['status'], $row['size_name'] );
+			$this->assertSame( 30, $row['quality'], 'The row keeps the requested quality.' );
+			$this->assertSame( 'quality_applied:77', $row['reason'], 'The row says which quality the editor applied.' );
+		}
+
+		$this->assertSame( 'up_to_date', Plugin::get_instance()->processor->sync( $id )->get_message(), 'A deviation does not make the variant stale.' );
 	}
 
 	public function test_missing_source_fails_with_reason() {
