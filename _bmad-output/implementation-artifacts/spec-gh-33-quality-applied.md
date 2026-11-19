@@ -2,7 +2,7 @@
 title: 'Apply the configured WebP/AVIF quality when saving a variant (#33)'
 type: 'bugfix'
 created: '2026-11-19'
-status: 'in-progress'
+status: 'done'
 baseline_commit: 'c14c7f882c727ab505fbb28d77c961de6855e4d2'
 route: ''
 review_loop_iteration: 0
@@ -100,6 +100,31 @@ context:
 - Red checks: with `main`'s converter, all four editor × format cases fail with "Quality 30 and 90 must give different files" (Imagick AVIF included). With task 1 only, the deviation test fails on the reason.
 - Every run used a per-run `docker run` wrapper with the tools image and the stand's network and volumes. Limits: 1–2 GB with no swap, 256 PIDs, a `timeout`. Its limits were checked on synthetic load first. The shared `docker-compose.yml` was not changed.
 - The test database held one leaked pending `trust_optimize_restore_queue` action from 2026-11-18. It caused 14 queue-signal failures in the 8.5 integration run. It was removed with the AGENTS.md command, and the run was repeated.
+
+## Review Triage Log
+
+Review 1 (diff c14c7f8..5db2bcf). Layers: blind-hunter (BH), edge-case-hunter (EC), verification-gap (VG).
+
+The patches are fixed in 8d1e453 (refactor: the `only_editor()` test helper) and 03326bb (the remaining patches). With the override priority lowered to 10, the third-party test fails, so the new assertion catches a reordering. After the patches the spec's Verification passed: phpcs; unit 8.0/8.5 (81 tests each); integration 8.5 latest (448 tests, 9 skipped) and 8.0 / 7.0 (448, 10 skipped). Nothing was deferred.
+
+| Finding | Layers | Verdict | Evidence | Route |
+|---|---|---|---|---|
+| The `PHP_INT_MAX` override is never shown to beat a third-party `PHP_INT_MAX` callback. The test with `$late_cb` (71 for WebP) asserts no row quality or reason. | VG, BH | medium | Lowering the priority to 10 leaves every test green and yields `quality_applied:71`. | patch |
+| `readme.txt`: the quality filters line does not say that core's `wp_editor_set_quality` no longer changes variants; the FAQ omits `quality_failed`. | BH | low | readme.txt:164 and :64. AGENTS.md wants the readme to follow behavior changes integrators see. | patch |
+| CHANGELOG says "remove their variants" without naming how. | BH | low | The actions exist: "Remove optimized files" on the Bulk tab, and `wp trust-optimize remove` / `remove-attachment` (readme.txt:114, :142-143). | patch |
+| The comment above `set_quality()` explains the refusal poorly. | BH | low | The real reason: an editor that rejects the value cannot be trusted to encode with it. On Imagick it keeps reporting the requested value. | patch |
+| CHANGELOG wording: "since" reads as a cause, and "encodes with another quality" overstates what is detected. | BH | low | The detection is `$editor->get_quality()`, the value the editor reports. | patch |
+| AC "any outcome … skipped" has no override-lifetime test for `not_smaller`. | BH | low | Removal happens in `save_with_quality()`'s finally before the branch, but no test covers it. | patch |
+| The deviating-editor test has no skip guard when GD cannot write WebP. | BH, EC | low | ImageConverterTest.php deviating test; the other new tests skip. | patch |
+| The "offer only editor X" closure is repeated four times. | BH | low | AGENTS.md: extract on the third repetition (`use_editor`, the failed-save loop, the refusing test, the deviating test). | patch |
+| Test helpers call `save()` on a possible `WP_Error` from `wp_get_image_editor()`. | BH, EC | low | `core_quality_behaviour()` and the defaults test: a fatal instead of a clear failure. | patch |
+| `save_with_quality()` declares no parameter types. | BH | low | The wrapped `write_temporary()` types `WP_Image_Editor`. | patch |
+| The override closure requires two arguments: `apply_filters( 'wp_editor_set_quality', $q )` during the save throws `ArgumentCountError`. | EC | low | WP_Hook passes only the given arguments when `accepted_args` ≥ their count (class-wp-hook.php:352). | patch |
+| `quality_applied:<n>` is visible only in the database. | BH | false | The owner accepted database-only visibility, and the CHANGELOG promises no UI. | reject |
+| A deviation is not recorded on `skipped` rows. | BH, EC | false | The frozen intent states that `skipped` keeps `not_smaller` with no deviation. | reject |
+| The defaults test hard-codes 86/82. | BH | false | The owner allowed literal defaults in the isolated test only. | reject |
+| The memory-exhaustion hazard is recorded only in the spec. | BH | false | Resolved outside this diff: per-container caps on the stand and `chore/tools-resource-limits`. | reject |
+| Imagick may list AVIF but fail to encode it, so the matrix fails instead of skipping. | EC | low | Not reproducible in the test images (Imagick AVIF encodes on 8.0 and 8.5). Unlikely, and the fix needs a probe write. | reject |
 
 ## Verification
 
