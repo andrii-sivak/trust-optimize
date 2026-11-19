@@ -310,6 +310,7 @@ class ImageConverterTest extends WP_UnitTestCase {
 		$im     = imagecreatetruecolor( 200, 120 );
 		imagejpeg( $im, $source, 95 );
 		$editor = wp_get_image_editor( $source );
+		$this->assertNotWPError( $editor );
 		$saved  = $editor->save( $this->dir . '/core-out.webp', 'image/webp' );
 		$out['saved_quality'] = $editor->get_quality();
 		$out['saved_hash']    = is_wp_error( $saved ) ? $saved->get_error_code() : md5_file( $saved['path'] );
@@ -376,8 +377,38 @@ class ImageConverterTest extends WP_UnitTestCase {
 
 		$this->assertTrue( $this->convert_row( $this->converter, $this->source( 'o.jpg', 'jpg', 934 ), $this->quality_settings( 'webp', 30 ) )->is_success() );
 
+		$row = $this->variants->get_for_attachment( 934 )[0];
+		$this->assertSame( 30, $row['quality'], 'The override wins over a later third-party callback during the save.' );
+		$this->assertNull( $row['reason'] );
 		$this->assertSame( 10, has_filter( 'wp_editor_set_quality', $default_cb ) );
 		$this->assertSame( PHP_INT_MAX, has_filter( 'wp_editor_set_quality', $late_cb ) );
+		$this->assertSame( $before, $this->core_quality_behaviour() );
+	}
+
+	public function test_the_override_is_gone_after_a_variant_that_is_not_smaller() {
+		$this->use_editor( 'WP_Image_Editor_GD', 'webp' );
+		$before = $this->core_quality_behaviour();
+
+		$im = imagecreatetruecolor( 64, 64 );
+		for ( $x = 0; $x < 64; $x++ ) {
+			for ( $y = 0; $y < 64; $y++ ) {
+				imagesetpixel( $im, $x, $y, imagecolorallocate( $im, wp_rand( 0, 255 ), wp_rand( 0, 255 ), wp_rand( 0, 255 ) ) );
+			}
+		}
+		imagejpeg( $im, $this->dir . '/n.jpg', 5 );
+		$this->variants->upsert(
+			array(
+				'attachment_id'        => 940,
+				'size_name'            => 'original',
+				'format'               => 'webp',
+				'source_relative_path' => $this->relative_dir . '/n.jpg',
+			)
+		);
+
+		$result = $this->convert_row( $this->converter, $this->variants->get_for_attachment( 940 )[0], $this->quality_settings( 'webp', 100 ) );
+
+		$this->assertTrue( $result->is_skipped() );
+		$this->assertSame( 'not_smaller', $this->variants->get_for_attachment( 940 )[0]['reason'] );
 		$this->assertSame( $before, $this->core_quality_behaviour() );
 	}
 
@@ -422,6 +453,7 @@ class ImageConverterTest extends WP_UnitTestCase {
 		$source = $this->dir . '/d.jpg';
 		foreach ( array( 'webp' => 86, 'avif' => 82 ) as $format => $default ) {
 			$editor = wp_get_image_editor( $source );
+			$this->assertNotWPError( $editor );
 			if ( ! $editor::supports_mime_type( 'image/' . $format ) ) {
 				continue;
 			}
@@ -486,6 +518,10 @@ class ImageConverterTest extends WP_UnitTestCase {
 	}
 
 	public function test_a_deviating_editor_is_recorded_and_the_next_sync_has_nothing_to_do() {
+		if ( ! WP_Image_Editor_GD::test() || ! WP_Image_Editor_GD::supports_mime_type( 'image/webp' ) ) {
+			$this->markTestSkipped( 'GD cannot write webp here.' );
+		}
+
 		update_option( 'trust_optimize_options', array( 'convert_to_webp' => 1, 'convert_to_avif' => 0, 'webp_quality' => 30 ) );
 		$id = self::factory()->attachment->create_upload_object( DIR_TESTDATA . '/images/canola.jpg' );
 		// The upload hook has already planned and queued it: start from a clean slate.

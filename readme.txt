@@ -61,7 +61,7 @@ TrustOptimize asks WordPress which formats its image editor (GD or Imagick) can 
 
 = Why was an image not converted? =
 
-Typical reasons, shown in the Media Library and by `wp trust-optimize status`: the converted file would not be smaller than the original (`not_smaller`), the image exceeds the pixel limit, the source file is missing, or free disk space is below the threshold and the work is paused. The limits are the settings "Largest image to convert" and "Minimum free disk space".
+Typical reasons, shown in the Media Library and by `wp trust-optimize status`: the converted file would not be smaller than the original (`not_smaller`), the image exceeds the pixel limit, the source file is missing, the image editor refused the configured quality (`quality_failed`), or free disk space is below the threshold and the work is paused. The limits are the settings "Largest image to convert" and "Minimum free disk space".
 
 = The conversion does not run, or runs slowly =
 
@@ -161,7 +161,7 @@ Filters:
 * `trust_optimize_should_render` ( bool $render, string $context, int $attachment_id ) – turn the `<picture>` delivery off for an image.
 * `trust_optimize_img_attributes` ( array $attrs, int $attachment_id, string $context ) – attributes set on the `<img>`; `null` or `false` removes an attribute.
 * `trust_optimize_cdn_hosts` ( string[] $hosts ) – extra hosts that serve the uploads directory.
-* `trust_optimize_webp_quality` and `trust_optimize_avif_quality` ( int $quality ) – quality of new variants.
+* `trust_optimize_webp_quality` and `trust_optimize_avif_quality` ( int $quality ) – quality of new variants. It is applied to the file even when another plugin filters `wp_editor_set_quality`.
 * `trust_optimize_max_pixels` ( int $pixels ) – largest image that is converted.
 * `trust_optimize_min_free_disk_bytes` ( int $bytes ) – free space below which conversion pauses.
 * `trust_optimize_worker_time_budget` ( float $seconds ) – time one task works before it continues in a new task (default 20).

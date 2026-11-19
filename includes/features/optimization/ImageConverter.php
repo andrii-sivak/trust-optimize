@@ -130,8 +130,8 @@ class ImageConverter {
 			return $this->fail( $id, $token, 'no_editor', $editor->get_error_message(), $claimed, $source_size );
 		}
 
-		// WordPress asks the editor for its own default quality when the output MIME differs from the source's, so the
-		// explicit value is only the first half: a refusal here means the encoder would keep an older value.
+		// An editor that rejects the requested value cannot be trusted to encode with it (Imagick keeps reporting the
+		// requested value while encoding with the old one), so the variant fails before any encode.
 		$quality_set = $editor->set_quality( $quality );
 
 		if ( is_wp_error( $quality_set ) ) {
@@ -253,8 +253,8 @@ class ImageConverter {
 	 * @param int              $quality     Requested quality.
 	 * @return array|\WP_Error Writer result.
 	 */
-	private function save_with_quality( $editor, $target_path, $mime, $quality ) {
-		$override = static function ( $value, $mime_type ) use ( $mime, $quality ) {
+	private function save_with_quality( \WP_Image_Editor $editor, string $target_path, string $mime, int $quality ) {
+		$override = static function ( $value, $mime_type = null ) use ( $mime, $quality ) {
 			return $mime_type === $mime ? $quality : $value;
 		};
 
