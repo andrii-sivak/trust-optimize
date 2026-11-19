@@ -12,7 +12,34 @@ usage() { echo "Usage: $0 <unit|integration> <8.0|8.5> [wp-version|latest]" >&2;
 case "$suite" in unit|integration) ;; *) usage ;; esac
 case "$php" in 8.0) service=tools-php80 ;; 8.5) service=tools-php85 ;; *) usage ;; esac
 
-exec "$(dirname "$0")/compose" run --rm -T -e "TO_SUITE=$suite" -e "TO_WP_VERSION=$wp_version" -e "TO_EXTRA_ARGS=$extra_args" -e "WP_MULTISITE=${WP_MULTISITE:-}" -e WP_TESTS_DB_HOST -e COMPOSER_PROCESS_TIMEOUT=0 "$service" sh -c '
+# One run at a time: runs share the test database, and each container may use its full memory limit.
+# The lock lives next to the stand's compose file, so every caller sees the same one whatever its TMPDIR.
+# The compose client below holds it until it exits.
+if ! command -v flock >/dev/null 2>&1; then
+  echo "tools/bin/test needs flock (util-linux) to keep test runs from overlapping; install it and retry." >&2
+  exit 69
+fi
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+compose_file="${TRUST_OPTIMIZE_COMPOSE_FILE:-$root/../../../../docker-compose.yml}"
+lock_dir="$(cd "$(dirname "$compose_file")" && pwd)/.cache"
+mkdir -p "$lock_dir"
+lock="$lock_dir/tools-test.lock"
+exec 9>"$lock"
+if ! flock -n 9; then
+  echo "Another tools/bin/test run is in progress ($lock). Wait for it to finish." >&2
+  exit 75
+fi
+
+# The lock goes when its client goes, but a killed client can leave its container running: a run is refused
+# while a container started by this script is still alive.
+label=trust-optimize.tools-run=test
+running="$(docker ps --filter "label=$label" --format '{{.Names}}')"
+if [ -n "$running" ]; then
+  echo "A test container from an earlier tools/bin/test run is still running: $running. Wait for it, or stop it: docker rm -f $running" >&2
+  exit 75
+fi
+
+exec "$(dirname "$0")/compose" run --rm -T --label "$label" -e "TO_SUITE=$suite" -e "TO_WP_VERSION=$wp_version" -e "TO_EXTRA_ARGS=$extra_args" -e "WP_MULTISITE=${WP_MULTISITE:-}" -e WP_TESTS_DB_HOST -e COMPOSER_PROCESS_TIMEOUT=0 "$service" sh -c '
   set -eu
   if [ ! -x vendor/bin/phpunit ]; then echo "phpunit is not installed: run tools/bin/composer install" >&2; exit 1; fi
   if [ "$TO_SUITE" = unit ]; then exec composer test:unit -- $TO_EXTRA_ARGS; fi
