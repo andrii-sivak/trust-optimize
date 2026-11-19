@@ -107,6 +107,12 @@ context:
   - **Quality 90, PHP-FPM.** `POST /image/272/sync` from wp-admin answered `optimized`. The original's WebP (Imagick, 204 844 B) and AVIF (GD, 295 510 B) are byte-identical to WordPress editor encodes at 90, not at 86/82. Rows: quality 90, reason NULL. The smaller sizes became `skipped` / `not_smaller` at 90, and their quality-30 files were removed, as before #33.
   - **Repeat.** A second sync answered `up_to_date`: same hashes and variant timestamps, no new `debug.log` lines.
   - **Cleanup.** The test image and its variants were deleted, and the settings went back to 85/78. The stand keeps running the #33 build.
+- Bulk check, 2026-11-19 (owner, settings WebP 80 / AVIF 62):
+  - **Run.** Sync job #20 re-encoded the stand library through the queue (cron, CLI, GD) in 4 minutes: 28 images, 354 variants. All are `done` with quality 80/62; no `not_smaller`, `failed`, `quality_failed` or `quality_applied`.
+  - **Proof.** For 2 PNG and 2 JPEG originals, WebP and AVIF are byte-identical to WordPress GD encodes at 80/62, not at 86/82.
+  - **Totals.** WebP went from 10.63 MB to 7.94 MB (−25 %) and AVIF from 10.48 MB to 5.68 MB (−46 %). Sources total 105.7 MB. The variants before were made by earlier builds, at 86/82.
+  - **AVIF vs WebP.** AVIF is now smaller than WebP for all 28 originals and all 149 sub-sizes.
+  - **Health.** Cron container memory peak 345 MiB (cap 1 GiB), no OOM, no new `debug.log` lines. The settings stay at 80/62.
 
 ## Review Triage Log
 
