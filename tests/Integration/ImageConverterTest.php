@@ -269,6 +269,18 @@ class ImageConverterTest extends WP_UnitTestCase {
 	}
 
 	/**
+	 * Offer WordPress only the given editor class.
+	 */
+	private function only_editor( $class ) {
+		add_filter(
+			'wp_image_editors',
+			static function () use ( $class ) {
+				return array( $class );
+			}
+		);
+	}
+
+	/**
 	 * Make the given editor the only one WordPress offers, or skip when it cannot write the format.
 	 */
 	private function use_editor( $editor, $format ) {
@@ -276,12 +288,7 @@ class ImageConverterTest extends WP_UnitTestCase {
 			$this->markTestSkipped( "$editor cannot write $format here." );
 		}
 
-		add_filter(
-			'wp_image_editors',
-			static function () use ( $editor ) {
-				return array( $editor );
-			}
-		);
+		$this->only_editor( $editor );
 	}
 
 	private function quality_settings( $format, $quality ) {
@@ -385,12 +392,7 @@ class ImageConverterTest extends WP_UnitTestCase {
 
 		foreach ( $cases as list( $editor, $exception, $id ) ) {
 			remove_all_filters( 'wp_image_editors' );
-			add_filter(
-				'wp_image_editors',
-				static function () use ( $editor ) {
-					return array( $editor );
-				}
-			);
+			$this->only_editor( $editor );
 			$row = $this->source( 'e' . $id . '.jpg', 'jpg', $id );
 
 			if ( null === $exception ) {
@@ -469,12 +471,7 @@ class ImageConverterTest extends WP_UnitTestCase {
 	public function test_an_editor_that_refuses_the_quality_fails_the_variant_and_frees_the_path() {
 		$this->use_editor( 'WP_Image_Editor_GD', 'webp' );
 		remove_all_filters( 'wp_image_editors' );
-		add_filter(
-			'wp_image_editors',
-			static function () {
-				return array( 'TrustOptimizeTestRefusingEditor' );
-			}
-		);
+		$this->only_editor( 'TrustOptimizeTestRefusingEditor' );
 		$row = $this->source( 'r.jpg', 'jpg', 939 );
 
 		$result = $this->convert_row( $this->converter, $row, $this->quality_settings( 'webp', 30 ) );
@@ -496,12 +493,7 @@ class ImageConverterTest extends WP_UnitTestCase {
 		$this->variants->delete_for_attachment( $id );
 		$this->attachments->delete( $id );
 
-		add_filter(
-			'wp_image_editors',
-			static function () {
-				return array( 'TrustOptimizeTestDeviatingEditor' );
-			}
-		);
+		$this->only_editor( 'TrustOptimizeTestDeviatingEditor' );
 
 		$result = Plugin::get_instance()->processor->sync( $id );
 
