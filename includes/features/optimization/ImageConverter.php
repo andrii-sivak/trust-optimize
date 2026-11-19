@@ -130,14 +130,20 @@ class ImageConverter {
 			return $this->fail( $id, $token, 'no_editor', $editor->get_error_message(), $claimed, $source_size );
 		}
 
-		$editor->set_quality( $quality );
+		// WordPress asks the editor for its own default quality when the output MIME differs from the source's, so the
+		// explicit value is only the first half: a refusal here means the encoder would keep an older value.
+		$quality_set = $editor->set_quality( $quality );
+
+		if ( is_wp_error( $quality_set ) ) {
+			return $this->fail( $id, $token, 'quality_failed', $quality_set->get_error_message(), $claimed, $source_size );
+		}
 
 		// A file at the target that is not what this row recorded is not ours: say so before spending the encoding on it.
 		if ( null !== $target_path && file_exists( $target_path ) && ! $this->writer->owns_target( $target_path, $owned_hash ) ) {
 			return $this->fail( $id, $token, 'target_exists_foreign', 'Target file exists and is not the TrustOptimize variant its row recorded.', $claimed, $source_size );
 		}
 
-		$saved = null === $target_path ? new \WP_Error( 'target_outside_uploads', 'Invalid target path.' ) : $this->writer->write_temporary( $editor, $target_path, $mime );
+		$saved = null === $target_path ? new \WP_Error( 'target_outside_uploads', 'Invalid target path.' ) : $this->save_with_quality( $editor, $target_path, $mime, $quality );
 
 		if ( is_wp_error( $saved ) ) {
 			return $this->fail( $id, $token, $this->failure_reason( $saved ), $saved->get_error_message(), $claimed, $source_size );
@@ -229,6 +235,33 @@ class ImageConverter {
 		}
 
 		return OptimizeResult::success( 'done', array( 'relative_path' => $target_relative ) + $data );
+	}
+
+	/**
+	 * Write the temporary file with the requested quality in force for the target MIME.
+	 *
+	 * Core resolves the quality again inside save() through wp_editor_set_quality, which replaces the value set on
+	 * the editor with its default. The override lives only for this save, and only our own callback is removed.
+	 *
+	 * @param \WP_Image_Editor $editor      Editor holding the source.
+	 * @param string           $target_path Absolute target path.
+	 * @param string           $mime        Target MIME type.
+	 * @param int              $quality     Requested quality.
+	 * @return array|\WP_Error Writer result.
+	 */
+	private function save_with_quality( $editor, $target_path, $mime, $quality ) {
+		$override = static function ( $value, $mime_type ) use ( $mime, $quality ) {
+			return $mime_type === $mime ? $quality : $value;
+		};
+
+		// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core filter.
+		add_filter( 'wp_editor_set_quality', $override, PHP_INT_MAX, 2 );
+
+		try {
+			return $this->writer->write_temporary( $editor, $target_path, $mime );
+		} finally {
+			remove_filter( 'wp_editor_set_quality', $override, PHP_INT_MAX );
+		}
 	}
 
 	/**
