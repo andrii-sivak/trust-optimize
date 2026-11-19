@@ -5,6 +5,7 @@
  * @package TrustOptimize\Tests
  */
 
+use TrustOptimize\Admin\Settings;
 use TrustOptimize\Capabilities\CapabilityService;
 use TrustOptimize\Core\Plugin;
 use TrustOptimize\Database\DatabaseManager;
@@ -246,6 +247,7 @@ class ImageConverterTest extends WP_UnitTestCase {
 		$after = $this->variants->get_for_attachment( 905 )[0];
 		$this->assertSame( VariantStatus::SKIPPED, $after['status'] );
 		$this->assertSame( 'not_smaller', $after['reason'] );
+		$this->assertSame( 100, $after['quality'], 'A skipped row records the requested quality.' );
 		$this->assertNull( $after['relative_path'] );
 		$this->assertFileDoesNotExist( $this->dir . '/noise.jpg.webp' );
 	}
@@ -341,14 +343,16 @@ class ImageConverterTest extends WP_UnitTestCase {
 				return 40;
 			}
 		);
-		$settings = new OptimizationSettings( array( 'webp' ), array( 'webp' ), array( 'webp' => 40 ) );
+		// The settings come from the stored options through the plugin's filter, as the worker builds them.
+		$settings = OptimizationSettings::from_options( new Settings(), $this->capabilities );
+		$this->assertSame( 40, $settings->quality_for( 'webp' ) );
 
 		$this->assertTrue( $this->convert_row( $this->converter, $this->source( 'f.jpg', 'jpg', 932 ), $settings )->is_success() );
 		$forty = md5_file( $this->dir . '/f.jpg.webp' );
 		$this->assertSame( 40, $this->variants->get_for_attachment( 932 )[0]['quality'] );
 
-		$this->assertTrue( $this->convert_row( $this->converter, $this->source( 'f2.jpg', 'jpg', 933 ), $this->quality_settings( 'webp', 41 ) )->is_success() );
-		$this->assertNotSame( $forty, md5_file( $this->dir . '/f2.jpg.webp' ) );
+		$this->assertTrue( $this->convert_row( $this->converter, $this->source( 'f2.jpg', 'jpg', 933 ), $this->quality_settings( 'webp', 90 ) )->is_success() );
+		$this->assertNotSame( $forty, md5_file( $this->dir . '/f2.jpg.webp' ), 'The filtered quality reached the encoder.' );
 	}
 
 	public function test_the_override_is_gone_after_a_conversion_and_third_party_callbacks_stay() {
