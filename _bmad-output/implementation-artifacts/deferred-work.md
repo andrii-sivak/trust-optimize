@@ -18,3 +18,7 @@
 
 - Cost of the attempt-evidence query (`BulkJobRepository::attempt_evidence()`) for a silent large job: it reads every attachment row of the job through `job_state` to check `updated_at`. Same shape as `has_progress_since_resume()` before #34; runs only while the producer is silent past the threshold. Measure with EXPLAIN on the stand before deciding on a `(job_id, updated_at)` index (schema change).
 - `AttachmentProcessor::convert_pending()` maps a derived `processing` state to `queued` + `more` and its closing write resets attempts, so an orphan reset that keeps failing reschedules forever without tripping the poison guard. Pre-existing; needs repeated DB errors.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-19-unconfirmed-file.md`
+  summary: A `done` variant is served from `relative_path` alone. `VariantRepository::servable_path()` does not require `file_hash`, so a done row that never recorded a hash is still delivered until cleanup drops the row.
+  evidence: Pre-existing AD-14 rule (`done` plus a path). The #19 cleanup change does not touch delivery. Found by the blind review of the #19 diff.

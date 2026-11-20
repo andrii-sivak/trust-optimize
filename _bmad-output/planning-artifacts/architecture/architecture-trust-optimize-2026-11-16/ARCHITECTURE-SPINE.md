@@ -7,9 +7,9 @@ paradigm: 'layered WordPress plugin with one composition root; producer-consumer
 scope: 'TrustOptimize plugin as of main 61e8212 (amended for #34; AD-1 exceptions recorded at 0943f8c): queue and Action Scheduler, bulk jobs and their liveness, resource gate and pacing, format capability, file ownership, variant storage, multisite'
 status: final
 created: '2026-11-16'
-updated: '2026-11-18'
+updated: '2026-11-20'
 binds: ['#19', '#21', '#22', '#26', '#28', '#29', '#30', '#31', '#32', '#34', '#35']
-sources: ['code at 0943f8c and 61e8212', 'AGENTS.md', 'readme.txt', 'GitHub issues #1-#40', 'owner decisions 2026-11-17', 'owner decisions for #30 2026-11-17 (AD-7, AD-9, AD-10)', 'owner decisions for #34 2026-11-18 (AD-5, AD-8, AD-9, AD-10)']
+sources: ['code at 0943f8c and 61e8212', 'AGENTS.md', 'readme.txt', 'GitHub issues #1-#40', 'owner decisions 2026-11-17', 'owner decisions for #30 2026-11-17 (AD-7, AD-9, AD-10)', 'owner decisions for #34 2026-11-18 (AD-5, AD-8, AD-9, AD-10)', 'owner decision for #19 2026-11-20 (AD-13): occupied target stays failed/target_exists_foreign; skipped, its display and its retry rules are deferred']
 companions: []
 ---
 
@@ -75,7 +75,7 @@ flowchart TD
 - **Rule:**
   - Transitions that several writers can attempt are conditional `UPDATE … WHERE <expected state>` in a repository: queueing, claiming, requeueing, parking, failing after a death, and every job status change. The caller acts only if the update hit a row.
   - Unconditional writes (`set_state`, `recompute`, `assign_job`, `VariantRepository::upsert`) are made only by the current claim holder, by the planner, or by the producer for its own job.
-  - **Variant evidence statuses.** Only a worker's token-guarded transition writes or refreshes a variant row in `processing`, `done`, `skipped` or `failed`. The exceptions are the death CAS and the poison CAS (`failed` / `max_attempts`) and cleanup (`failed` / `delete_failed`). The planner writes only `pending`, and refreshing an existing row never touches its `updated_at` unless it changes its status to `pending`. A new writer of these statuses (AD-14 keep-done, #19, #26, #35, #40) uses its own reason and is added to the AD-8 exclusions in the same change.
+  - **Variant evidence statuses.** Only a worker's token-guarded transition writes or refreshes a variant row in `processing`, `done`, `skipped` or `failed`. The exceptions are the death CAS and the poison CAS (`failed` / `max_attempts`) and cleanup (`failed` / `delete_failed`). The planner writes only `pending`, and refreshing an existing row never touches its `updated_at` unless it changes its status to `pending`. A new writer of these statuses (AD-14 keep-done, #26, #35, #40, and the deferred occupied-target status change) uses its own reason and is added to the AD-8 exclusions in the same change.
   - Status values are constants of `Domain\AttachmentState`, `VariantStatus` and `JobStatus`, within `COLUMN_LENGTH` (32).
 
 ### AD-4 — One AS action per attachment, scheduled by one place [ADOPTED, amended]
@@ -305,8 +305,7 @@ flowchart TD
   - **The rename is part of a publication.** It never replaces a file that another attempt published. A served file only changes through a publication that still holds its attempt (AD-10).
   - **Ownership** is confirmed only when a variant row owns the `relative_path` and the file's hash equals the row's `file_hash`, which is recorded after a successful write. A reservation row plus a matching path is not confirmation.
   - **What may be changed.** The plugin changes or deletes only files with confirmed ownership. Originals, WordPress sizes and other attachments' files are never touched.
-  - **Occupied target.** When the target path holds a file without confirmed ownership, the variant is skipped with `target_exists_foreign` and a message saying the file exists and is not confirmed as TrustOptimize's. Work continues. The plugin never adopts, overwrites or deletes such a file, in any action.
-    - Until #19, the writer records this outcome as `failed` / `target_exists_foreign` rather than `skipped`. The file is kept either way, and the attempt ends normally, not as a death.
+  - **Occupied target.** When the target path holds a file without confirmed ownership, the writer records `failed` / `target_exists_foreign` and a message saying the file exists and is not confirmed as TrustOptimize's. Work continues. The plugin never adopts, overwrites or deletes such a file, in any action. The file is kept, and the attempt ends normally, not as a death.
   - **Deletion.** A file shared by several rows is deleted by its last owner. Every deletion is verified on the filesystem; a row whose file could not be deleted is kept as `failed`.
 
 ### AD-14 — Variant storage, staleness and delivery during re-optimization [ADOPTED, amended]
@@ -473,3 +472,4 @@ Where the diagnostics writer (AD-18) lives is decided in the #26 spec.
 - **Overdue-tasks notice per environment, and readme guidance on runners and CLI vs web.** Owned by #25 (notice) and #22 (readme).
 - **Per-image settings.** Owned by #40, within AD-13 and AD-14.
 - **AVIF encoder speed and AVIF-vs-WebP preference.** Owned by #27, after the measurements in #32.
+- **Showing an occupied target as `skipped`, and when planning retries it.** AD-13 records `failed` / `target_exists_foreign`. The file is kept and the attempt ends normally. Changing that outcome to `skipped`, together with how the result is shown and the retry rules, is a later change. It is not part of #19. When it lands, that writer uses its own reason and joins the AD-8 exclusions in the same change (AD-3).
