@@ -18,9 +18,10 @@ use TrustOptimize\Value\DeleteResult;
 /**
  * Class ImageCleanupService
  *
- * Deletes only files that a variant row of the plugin points at. A row is removed
- * once its file is confirmed gone (or turned out not to be ours, or is in use by another
- * attachment); a file that cannot be deleted keeps its row, marked failed.
+ * Deletes a file only when its row's file_hash matches the bytes at that path.
+ * NULL and '' are not proof. A row is removed once its file is confirmed gone
+ * (or turned out not to be ours, or is in use by another attachment); a file that
+ * cannot be deleted keeps its row, marked failed.
  */
 class ImageCleanupService {
 
@@ -188,7 +189,8 @@ class ImageCleanupService {
 	}
 
 	/**
-	 * Delete the files of rows after safety checks, and the rows themselves when asked to.
+	 * Delete files whose file_hash matches the bytes, after safety checks,
+	 * and the rows themselves when asked to.
 	 *
 	 * @param int     $attachment_id Attachment ID.
 	 * @param array[] $rows          Variant rows.
@@ -252,7 +254,7 @@ class ImageCleanupService {
 	 *
 	 * @param int         $attachment_id Attachment the row belongs to.
 	 * @param string      $relative_path Path relative to uploads, empty when the row has no file.
-	 * @param string|null $hash          Expected SHA-256 of the file, if known.
+	 * @param string|null $hash          SHA-256 the row recorded; NULL and '' are not proof and skip deletion.
 	 * @param array       $protected     Protected paths keyed by normalized path.
 	 * @return array{status:string,reason?:string,path?:string} Status: deleted, skipped or failed.
 	 */
@@ -303,7 +305,15 @@ class ImageCleanupService {
 			);
 		}
 
-		if ( ! empty( $hash ) && hash_file( 'sha256', $path ) !== $hash ) {
+		// A reserved path is not ownership. Only a recorded hash that matches the bytes proves we wrote this file.
+		if ( null === $hash || '' === $hash ) {
+			return array(
+				'status' => 'skipped',
+				'reason' => 'unconfirmed',
+			);
+		}
+
+		if ( hash_file( 'sha256', $path ) !== $hash ) {
 			return array(
 				'status' => 'skipped',
 				'reason' => 'hash_mismatch',
