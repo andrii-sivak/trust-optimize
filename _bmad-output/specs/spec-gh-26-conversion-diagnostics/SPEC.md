@@ -7,7 +7,7 @@ companions:
 sources: []
 ---
 
-# Opt-in conversion diagnostics (#26 slice)
+# Conversion diagnostics (#26 slice)
 
 ## Why
 
@@ -16,7 +16,7 @@ A pain for the operator of a small host, and the measurement the later resource 
 ## Capabilities
 
 - **CAP-1**
-  - **intent:** An operator turns conversion diagnostics on with an explicit configuration flag. Off is the default, and off does no diagnostic-only work.
+  - **intent:** An operator controls conversion diagnostics with the existing settings checkbox. Recording is on by default; saving off stops diagnostic-only measurements and new records while keeping existing files and periodic cleanup.
   - **success:** With the option row absent, a conversion writes a diagnostics line. `get_option` returning the string `1` does too. The stored string `0` writes nothing and takes no cgroup or CPU sample, and age cleanup still deletes a file older than 60 days. The settings screen shows "Keep diagnostic logs" checked when the row is absent and unchecked when the stored value is `0`. Saving the form stores `'1'` or `'0'` on `trust_optimize_diagnostics` and does not put that key in `trust_optimize_options`. A stored `0` is still `0` after the main settings are saved again.
 - **CAP-2**
   - **intent:** While diagnostics are on, a variant conversion leaves a start line flushed before the image editor opens, and a result line after the attempt finishes, and both lines carry the same `conversion_id`.
@@ -28,15 +28,15 @@ A pain for the operator of a small host, and the measurement the later resource 
   - **intent:** A diagnostics failure, including a lock that is not acquired, does not interrupt a conversion and does not change its outcome.
   - **success:** With the diagnostics directory not writable, or with the write lock already held, the variant status, reason, and output bytes match the same conversion with diagnostics off. The held-lock case returns without waiting and writes no line. No exception from the writer escapes the converter.
 - **CAP-5**
-  - **intent:** Each site keeps its own diagnostics under `uploads/to-logs`, bounded by 60 days and by the size caps, and can drop them without Action Scheduler.
+  - **intent:** Each site keeps its own diagnostics under `uploads/to-logs`, with size caps and periodic cleanup of files older than 60 days. Cleanup works without Action Scheduler.
   - **success:** A line written for site B is not in site A's `to-logs`. Age cleanup deletes a JSONL file older than 60 days and does not schedule an Action Scheduler action. Uninstall with "Remove data on uninstall" deletes that site's `to-logs` only on the request that also drops that site's options, and the directory goes first. An uninstall that stops early and keeps the tables keeps `to-logs`. The settings screen, REST responses, and WP-CLI output contain no URL of a log file. The directory contains the deny files. The test does not claim the URL returns an error.
 - **CAP-6**
   - **intent:** A recorded figure names what it measures, and a figure that could not be read is marked unavailable. A line that was not written establishes nothing.
-  - **success:** When the cgroup files cannot be read, the start line has `cgroup` of `unavailable` and does not copy `php_bytes` into a cgroup field. The PHP memory scope string says the PHP allocator. No attachment or variant row gains a cause because a result line or a start line is missing, or because a write was skipped.
+  - **success:** On start and result, a readable `memory.current` stays an integer with its memory scope. A complete same-line non-negative `oom_kill` integer within the PHP integer range stays an integer, including zero. If the events file or counter cannot be read as valid, `cgroup_oom_kill` is `unavailable`, `cgroup_oom_reason` is `not_readable`, and `cgroup_oom_scope` stays `cgroup_counter`; the conversion outcome is unchanged. When `memory.current` cannot be read, the line has `cgroup` of `unavailable` and does not copy `php_bytes` into a cgroup field. The PHP memory scope string says the PHP allocator. No attachment or variant row gains a cause because a result line or a start line is missing, or because a write was skipped.
 
 ## Constraints
 
-- AD-18 binds this spec. Directory is that site's `uploads/to-logs`, with the usual deny files and no secret directory name. The plugin never emits a URL and does not guarantee the files are unreachable. Retention is 60 days. Starting caps are 512 MiB per site and 8 MiB per file, and both are maxima, so a busy site keeps less than 60 days. Pace-change lines and gate-decision lines are not written.
+- AD-18 binds this spec. Directory is that site's `uploads/to-logs`, with the usual deny files and no secret directory name. The plugin never emits a URL and does not guarantee the files are unreachable. Periodic cleanup removes files older than 60 days from the last write. The size caps are 512 MiB per site and 8 MiB per file. The site cap can shorten retention. Pace-change lines and gate-decision lines are not written.
 - The flag is the option `trust_optimize_diagnostics`, its own row. Recording is on when the row is absent and when `get_option` returns the string `1`. The stored string `0` is off and is not deleted by a plugin update or by saving the other settings. The existing settings screen has the checkbox "Keep diagnostic logs", checked by default. The form posts a hidden `0` and the checkbox `1`, and stores only those strings. The key is not part of `trust_optimize_options`. While off, no new diagnostic measurement and no new event are written. Existing files stay, and periodic age cleanup still runs. No new admin screen, no clear-logs control, no new WP-CLI command, no REST field, and no new hook. On a multisite the option is per site.
 - One writer object is constructed in `Plugin` and passed into the converter and the attachment processor. It is not reached through a static call.
 - `variant_result` records the status and reason returned by this `convert()` call. It is not a later read of the row. Match the row only when this attempt completed the transition: `done`, `not_smaller`, and a `fail()` that updated the row. `not_pending`, `attempt_lost`, and `row_gone` are logged as returned and are not compared to the row. The diagnostics writer performs no row write of its own.
@@ -50,7 +50,7 @@ A pain for the operator of a small host, and the measurement the later resource 
 - Writer time counts inside the worker deadline. The deadline is not moved forward to pay the write back. A run may therefore finish fewer variants than the same run with the flag off. The lock try does not wait. The lock is not held across the editor or the encoder. A recording error does not enter the worker's exception path.
 - The directory, rotation, the 1280-byte line cap, locking, the per-write size check, periodic age cleanup, and uninstall are `storage.md`. A line that would exceed 1280 bytes is not written. Required fields are not stripped to make it fit.
 - While the flag is off, periodic age cleanup may still delete old files on an admin load. It does not sample CPU, PHP memory, or the cgroup for a record, and it does not append an event.
-- No schema change. `readme.txt` documents the checkbox, the default on, the stored `0`, `uploads/to-logs`, 60 days, and 512 MB. The settings list includes the checkbox. Comments do not cite an issue or this spec.
+- No schema change. `readme.txt` documents the checkbox, the default on, the stored `0`, `uploads/to-logs`, periodic cleanup after 60 days from the last write, 512 MiB per site, and 8 MiB per file. The settings list includes the checkbox. Comments do not cite an issue or this spec.
 
 ## Non-goals
 
@@ -67,7 +67,7 @@ A pain for the operator of a small host, and the measurement the later resource 
 
 ## Success signal
 
-On a site with `trust_optimize_diagnostics` set to `1`, a conversion that dies inside the editor leaves a start line with the attachment, size, format, `conversion_id`, and the pre-editor figures, and no result line with that id. A conversion that finishes leaves a result line with the same id whose status matches the variant row, plus one environment line for that job rather than one per variant. With the flag off, the same conversion writes no diagnostics file and makes no cgroup or CPU sample. A busy write lock or an unwritable directory leaves the variant outcome unchanged.
+On a site with `trust_optimize_diagnostics` absent or set to string `'1'`, a conversion that dies inside the editor leaves a start line with the attachment, size, format, `conversion_id`, and the pre-editor figures, and no result line with that id. A conversion that finishes leaves a result line with the same id whose status matches the variant row, plus one environment line for that job rather than one per variant. With the flag off, the same conversion writes no diagnostics file and makes no cgroup or CPU sample. A busy write lock or an unwritable directory leaves the variant outcome unchanged.
 
 ## Assumptions
 

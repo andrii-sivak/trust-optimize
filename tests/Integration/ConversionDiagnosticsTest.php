@@ -1,6 +1,6 @@
 <?php
 /**
- * Opt-in conversion diagnostics.
+ * Conversion diagnostics.
  *
  * @package TrustOptimize\Tests
  */
@@ -48,6 +48,17 @@ class TrustOptimizeCountingDiagnostics extends ConversionDiagnostics {
 	 * @var bool
 	 */
 	public $cgroup_unreadable = false;
+
+	/**
+	 * Directory with fixture cgroup files, or null to use the real cgroup.
+	 *
+	 * @var string|null
+	 */
+	public $cgroup_fixture_dir = null;
+
+	protected function cgroup_dir() {
+		return $this->cgroup_fixture_dir ?? parent::cgroup_dir();
+	}
 
 	protected function sample_cgroup() {
 		++$this->cgroup_reads;
@@ -281,8 +292,8 @@ class ConversionDiagnosticsTest extends WP_UnitTestCase {
 		$this->assertSame( '1', get_option( ConversionDiagnostics::OPTION ) );
 		$this->assertTrue( ( new ConversionDiagnostics( new Settings() ) )->is_enabled() );
 
-		update_option( 'trust_optimize_options', ( new Settings() )->sanitize( array( 'convert_to_webp' => 1 ) ) );
 		$this->post_diagnostics( '0' );
+		update_option( 'trust_optimize_options', ( new Settings() )->sanitize( array( 'convert_to_webp' => 1 ) ) );
 		$this->assertSame( '0', get_option( ConversionDiagnostics::OPTION ) );
 		$stored = get_option( 'trust_optimize_options' );
 		$this->assertArrayNotHasKey( 'trust_optimize_diagnostics', $stored );
@@ -563,14 +574,111 @@ class ConversionDiagnosticsTest extends WP_UnitTestCase {
 		$this->assertSame( 'php_allocator_pages_excludes_native', $start['php_memory_scope'] );
 	}
 
-	public function test_readable_cgroup_current_is_an_integer() {
-		if ( ! is_readable( '/sys/fs/cgroup/memory.current' ) ) {
-			$this->markTestSkipped( 'No cgroup memory.current on this host.' );
-		}
+	/**
+	 * @dataProvider cgroup_events_samples
+	 */
+	public function test_cgroup_samples_preserve_memory_and_distinguish_unavailable_oom( $events, $expected ) {
 		update_option( ConversionDiagnostics::OPTION, '1', false );
-		$this->convert_row( $this->converter( $this->counting_writer() ), $this->pending_jpeg( 'cgroup.jpg', 515 ) );
-		$start = $this->events_of( 'variant_start' )[0];
-		$this->assertIsInt( $start['cgroup_memory_current_bytes'] );
+		file_put_contents( $this->dir . '/memory.current', "123456\n" );
+		if ( null !== $events ) {
+			file_put_contents( $this->dir . '/memory.events', $events );
+		}
+		$writer                     = $this->counting_writer();
+		$writer->cgroup_fixture_dir = $this->dir;
+		$result = $this->convert_row( $this->converter( $writer ), $this->pending_jpeg( 'cgroup.jpg', 515 ) );
+		$this->assertTrue( $result->is_success() );
+		$this->assertSame( VariantStatus::DONE, $this->variants->get_for_attachment( 515 )[0]['status'] );
+		foreach ( array( 'variant_start', 'variant_result' ) as $type ) {
+			$events = $this->events_of( $type );
+			$this->assertCount( 1, $events );
+			$event = $events[0];
+			$this->assertSame( 123456, $event['cgroup_memory_current_bytes'] );
+			$this->assertSame( 'cgroup_including_neighbours', $event['cgroup_memory_scope'] );
+			$this->assertSame( $expected, $event['cgroup_oom_kill'] );
+			$this->assertSame( 'cgroup_counter', $event['cgroup_oom_scope'] );
+			$this->assertArrayNotHasKey( 'cgroup', $event );
+			if ( 'unavailable' === $expected ) {
+				$this->assertSame( 'not_readable', $event['cgroup_oom_reason'] );
+			} else {
+				$this->assertArrayNotHasKey( 'cgroup_oom_reason', $event );
+			}
+		}
+	}
+
+	public static function cgroup_events_samples() {
+		return array(
+			'zero'           => array( "low 0\noom_kill 0\noom_group_kill 0\n", 0 ),
+			'positive'       => array( "oom_kill 7\n", 7 ),
+			'maximum'        => array( 'oom_kill ' . PHP_INT_MAX . "\n", PHP_INT_MAX ),
+			'missing file'   => array( null, 'unavailable' ),
+			'missing field'  => array( "oom 7\n", 'unavailable' ),
+			'empty'          => array( '', 'unavailable' ),
+			'negative'       => array( "oom_kill -1\n", 'unavailable' ),
+			'nonnumeric'     => array( "oom_kill unknown\n", 'unavailable' ),
+			'numeric prefix' => array( "oom_kill 7oops\n", 'unavailable' ),
+			'split line'     => array( "oom_kill\n7\n", 'unavailable' ),
+			'overflow'       => array( 'oom_kill ' . PHP_INT_MAX . "0\n", 'unavailable' ),
+		);
+	}
+
+	public function test_cgroup_result_resamples_memory_and_oom_availability() {
+		update_option( ConversionDiagnostics::OPTION, '1', false );
+		file_put_contents( $this->dir . '/memory.current', "123456\n" );
+		file_put_contents( $this->dir . '/memory.events', "oom_kill 0\n" );
+		$writer                     = $this->counting_writer();
+		$writer->cgroup_fixture_dir = $this->dir;
+		$file_writer                = $this->writer_after_temporary(
+			function () {
+				file_put_contents( $this->dir . '/memory.current', "234567\n" );
+				file_put_contents( $this->dir . '/memory.events', "oom_kill invalid\n" );
+			}
+		);
+
+		$result = $this->convert_row( $this->converter( $writer, $file_writer ), $this->pending_jpeg( 'cgroup.jpg', 515 ) );
+		$this->assertTrue( $result->is_success() );
+		$start    = $this->events_of( 'variant_start' )[0];
+		$finished = $this->events_of( 'variant_result' )[0];
+		$this->assertSame( 123456, $start['cgroup_memory_current_bytes'] );
+		$this->assertSame( 0, $start['cgroup_oom_kill'] );
+		$this->assertSame( 234567, $finished['cgroup_memory_current_bytes'] );
+		$this->assertSame( 'unavailable', $finished['cgroup_oom_kill'] );
+		$this->assertSame( 'not_readable', $finished['cgroup_oom_reason'] );
+	}
+
+	public function test_cgroup_events_read_exception_preserves_the_memory_sample() {
+		update_option( ConversionDiagnostics::OPTION, '1', false );
+		file_put_contents( $this->dir . '/memory.current', "123456\n" );
+		// A readable directory cannot be read as a counter file.
+		$this->assertTrue( symlink( $this->dir, $this->dir . '/memory.events' ) );
+		$writer                     = $this->counting_writer();
+		$writer->cgroup_fixture_dir = $this->dir;
+		$row                        = $this->pending_jpeg( 'cgroup.jpg', 515 );
+		$read_errors                = 0;
+
+		set_error_handler(
+			static function ( $severity, $message ) use ( &$read_errors ) {
+				if ( str_starts_with( $message, 'file_get_contents():' ) ) {
+					++$read_errors;
+					throw new ErrorException( $message, 0, $severity );
+				}
+				return false;
+			}
+		);
+		try {
+			$result = $this->convert_row( $this->converter( $writer ), $row );
+		} finally {
+			restore_error_handler();
+		}
+
+		$this->assertTrue( $result->is_success() );
+		$this->assertSame( 2, $read_errors );
+		foreach ( array( 'variant_start', 'variant_result' ) as $type ) {
+			$events = $this->events_of( $type );
+			$this->assertCount( 1, $events );
+			$this->assertSame( 123456, $events[0]['cgroup_memory_current_bytes'] );
+			$this->assertSame( 'unavailable', $events[0]['cgroup_oom_kill'] );
+			$this->assertSame( 'not_readable', $events[0]['cgroup_oom_reason'] );
+		}
 	}
 
 	public function test_deadline_is_not_increased_by_a_write() {
@@ -871,7 +979,9 @@ class ConversionDiagnosticsTest extends WP_UnitTestCase {
 
 	private function counting_from( ImageConverter $converter ) {
 		$ref = new ReflectionProperty( ImageConverter::class, 'diagnostics' );
-		$ref->setAccessible( true );
+		if ( PHP_VERSION_ID < 80100 ) {
+			$ref->setAccessible( true );
+		}
 		$diag = $ref->getValue( $converter );
 
 		return $diag instanceof ConversionDiagnostics ? $diag : null;
