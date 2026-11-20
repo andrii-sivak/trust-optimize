@@ -15,6 +15,28 @@ use TrustOptimize\Queue\ConversionQueue;
 use TrustOptimize\Storage\AttachmentRepository;
 use TrustOptimize\Storage\VariantRepository;
 
+require_once ABSPATH . WPINC . '/class-wp-image-editor.php';
+require_once ABSPATH . WPINC . '/class-wp-image-editor-gd.php';
+
+/**
+ * GD editor that counts load() so inventory can be shown not to decode.
+ */
+class TrustOptimizeInventoryCountingEditor extends WP_Image_Editor_GD {
+
+	/**
+	 * load() calls since the last reset.
+	 *
+	 * @var int
+	 */
+	public static $loads = 0;
+
+	public function load() {
+		++self::$loads;
+
+		return parent::load();
+	}
+}
+
 /**
  * @covers \TrustOptimize\Bulk\Inventory
  * @covers \TrustOptimize\Storage\VariantRepository::count_outdated
@@ -112,5 +134,51 @@ class InventoryTest extends WP_UnitTestCase {
 		$this->assertSame( 1, $inventory['missing_source_files']);
 		$this->assertSame( 1, $inventory['oversized_attachments'] );
 		$this->assertSame( 3, $inventory['eligible_attachments'] );
+	}
+
+	public function test_inspect_counts_a_header_as_oversized_and_not_unknown_dimensions() {
+		$header  = $this->upload();
+		$unknown = $this->upload();
+		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+
+		$sof  = "\xFF\xC0" . pack( 'n', 11 ) . "\x08" . pack( 'n', 12000 ) . pack( 'n', 12000 ) . "\x01\x01\x11\x00";
+		file_put_contents( get_attached_file( $header ), "\xFF\xD8" . $sof . "\xFF\xD9" );
+		wp_update_attachment_metadata( $header, array() );
+		file_put_contents( get_attached_file( $unknown ), 'not-an-image' );
+		wp_update_attachment_metadata( $unknown, array() );
+
+		TrustOptimizeInventoryCountingEditor::$loads = 0;
+		add_filter(
+			'wp_image_editors',
+			static function () {
+				return array( TrustOptimizeInventoryCountingEditor::class );
+			}
+		);
+
+		$counts = Plugin::get_instance()->inventory->inspect( array( $header, $unknown ) );
+
+		$this->assertSame( 0, $counts['missing_source_files'] );
+		$this->assertSame( 1, $counts['oversized_attachments'] );
+		$this->assertSame( 0, TrustOptimizeInventoryCountingEditor::$loads );
+	}
+
+	public function test_inspect_counts_insufficient_memory_from_a_header() {
+		$id = $this->upload();
+		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+
+		$sof = "\xFF\xC0" . pack( 'n', 11 ) . "\x08" . pack( 'n', 3000 ) . pack( 'n', 3000 ) . "\x01\x01\x11\x00";
+		file_put_contents( get_attached_file( $id ), "\xFF\xD8" . $sof . "\xFF\xD9" );
+		wp_update_attachment_metadata( $id, array() );
+
+		$old = ini_get( 'memory_limit' );
+		ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 10 * MB_IN_BYTES ) ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed
+
+		try {
+			$counts = Plugin::get_instance()->inventory->inspect( array( $id ) );
+		} finally {
+			ini_set( 'memory_limit', $old ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed
+		}
+
+		$this->assertSame( 1, $counts['oversized_attachments'] );
 	}
 }

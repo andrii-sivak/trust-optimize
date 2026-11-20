@@ -61,7 +61,7 @@ TrustOptimize asks WordPress which formats its image editor (GD or Imagick) can 
 
 = Why was an image not converted? =
 
-Typical reasons, shown in the Media Library and by `wp trust-optimize status`: the converted file would not be smaller than the original (`not_smaller`), the image exceeds the pixel limit, the source file is missing, the image editor refused the configured quality (`quality_failed`), or free disk space is below the threshold and the work is paused. The limits are the settings "Largest image to convert" and "Minimum free disk space".
+Typical reasons, shown in the Media Library and by `wp trust-optimize status`: the converted file would not be smaller than the original (`not_smaller`), the image exceeds the pixel limit, the image dimensions cannot be established (`unknown_dimensions`), the source file is missing, the image editor refused the configured quality (`quality_failed`), or free disk space is below the threshold and the work is paused. The limits are the settings "Largest image to convert" and "Minimum free disk space".
 
 = The conversion does not run, or runs slowly =
 

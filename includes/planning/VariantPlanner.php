@@ -96,6 +96,10 @@ class VariantPlanner {
 				$this->attachments->set_state( $attachment_id, AttachmentState::SKIPPED, $source );
 			}
 
+			if ( 'unknown_dimensions' === $source ) {
+				$existing = self::unknown_dimensions_deletions( $existing, $settings );
+			}
+
 			return new Plan( $source, array(), $existing );
 		}
 
@@ -372,8 +376,7 @@ class VariantPlanner {
 		}
 
 		$metadata = wp_get_attachment_metadata( $attachment_id );
-		$metadata = is_array( $metadata ) ? $metadata : array();
-		$reason   = ImageLimits::skip_reason( (int) ( $metadata['width'] ?? 0 ), (int) ( $metadata['height'] ?? 0 ) );
+		$reason   = ImageLimits::skip_reason_for_file( $file, $metadata );
 
 		if ( null !== $reason ) {
 			return $reason;
@@ -381,8 +384,53 @@ class VariantPlanner {
 
 		return array(
 			'relative_path' => $relative,
-			'metadata'      => $metadata,
+			'metadata'      => is_array( $metadata ) ? $metadata : array(),
 			'mime'          => $mime,
+		);
+	}
+
+	/**
+	 * Rows removed when dimensions cannot be established.
+	 *
+	 * A done variant that still matches its own source file and whose format is enabled stays:
+	 * that source is not being replaced, only the attached file's size is unknown.
+	 *
+	 * @param array[]              $existing Stored rows.
+	 * @param OptimizationSettings $settings Current settings.
+	 * @return array[] Rows to delete.
+	 */
+	private static function unknown_dimensions_deletions( array $existing, OptimizationSettings $settings ) {
+		$sizes = array();
+
+		foreach ( $existing as $row ) {
+			$path = $row['source_relative_path'];
+
+			if ( ! isset( $sizes[ $path ] ) ) {
+				$absolute       = UploadsPath::absolute( $path );
+				$sizes[ $path ] = null === $absolute ? 0 : (int) wp_filesize( $absolute );
+			}
+		}
+
+		return array_values(
+			array_filter(
+				$existing,
+				static function ( $row ) use ( $settings, $sizes ) {
+					if ( VariantStatus::DONE !== $row['status'] ) {
+						return true;
+					}
+
+					if ( ! $settings->is_enabled( $row['format'] ) ) {
+						return true;
+					}
+
+					return self::source_changed(
+						$row,
+						array(
+							'source_file_size' => $sizes[ $row['source_relative_path'] ],
+						)
+					);
+				}
+			)
 		);
 	}
 }

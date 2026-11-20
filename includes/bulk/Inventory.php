@@ -118,9 +118,9 @@ class Inventory {
 				continue;
 			}
 
-			$metadata = wp_get_attachment_metadata( $attachment_id );
+			$reason = ImageLimits::skip_reason_for_file( $file, wp_get_attachment_metadata( $attachment_id ) );
 
-			if ( null !== ImageLimits::skip_reason( (int) ( $metadata['width'] ?? 0 ), (int) ( $metadata['height'] ?? 0 ) ) ) {
+			if ( 'too_large' === $reason || 'insufficient_memory' === $reason ) {
 				++$counts['oversized_attachments'];
 			}
 		}

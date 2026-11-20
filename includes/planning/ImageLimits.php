@@ -10,7 +10,7 @@ namespace TrustOptimize\Planning;
 /**
  * Class ImageLimits
  *
- * Decides from the dimensions in the metadata, without decoding the file.
+ * Decides from declared dimensions, without decoding a bitmap.
  */
 final class ImageLimits {
 
@@ -32,16 +32,19 @@ final class ImageLimits {
 	/**
 	 * Why an image of these dimensions must not be converted.
 	 *
-	 * @param int $width  Width in pixels (0 when unknown).
-	 * @param int $height Height in pixels (0 when unknown).
-	 * @return string|null "too_large", "insufficient_memory" or null when it may be converted.
+	 * @param int $width  Width in pixels.
+	 * @param int $height Height in pixels.
+	 * @return string|null "too_large", "insufficient_memory", "unknown_dimensions", or null when it may be converted.
 	 */
 	public static function skip_reason( $width, $height ) {
-		$pixels = (int) $width * (int) $height;
+		$width  = (int) $width;
+		$height = (int) $height;
 
-		if ( $pixels <= 0 ) {
-			return null;
+		if ( $width < 1 || $height < 1 ) {
+			return 'unknown_dimensions';
 		}
+
+		$pixels = $width * $height;
 
 		/**
 		 * Filters the largest image (width x height) that is converted.
@@ -59,5 +62,59 @@ final class ImageLimits {
 		}
 
 		return null;
+	}
+
+	/**
+	 * Why the attached file must not be converted, from metadata or a JPEG/PNG header.
+	 *
+	 * Two positive metadata sides are trusted. The header is read only when they are
+	 * missing, and only for JPEG and PNG: other types would decode through an editor.
+	 *
+	 * @param string $file     Absolute path of the attached file.
+	 * @param mixed  $metadata Attachment metadata as stored by WordPress.
+	 * @return string|null Same values as skip_reason().
+	 */
+	public static function skip_reason_for_file( $file, $metadata ) {
+		$metadata = is_array( $metadata ) ? $metadata : array();
+		$width    = self::positive_side( $metadata['width'] ?? null );
+		$height   = self::positive_side( $metadata['height'] ?? null );
+
+		if ( null !== $width && null !== $height ) {
+			return self::skip_reason( $width, $height );
+		}
+
+		if ( ! is_string( $file ) || '' === $file || ! is_file( $file ) ) {
+			return 'unknown_dimensions';
+		}
+
+		$mime = wp_get_image_mime( $file );
+
+		if ( 'image/jpeg' !== $mime && 'image/png' !== $mime ) {
+			return 'unknown_dimensions';
+		}
+
+		$size = wp_getimagesize( $file );
+
+		if ( ! is_array( $size ) ) {
+			return 'unknown_dimensions';
+		}
+
+		return self::skip_reason( $size[0] ?? 0, $size[1] ?? 0 );
+	}
+
+	/**
+	 * A declared side that can be used as a pixel count.
+	 *
+	 * @param mixed $value Raw metadata value.
+	 * @return int|null Null when the value is not an integer >= 1.
+	 */
+	private static function positive_side( $value ) {
+		if ( ! is_numeric( $value ) ) {
+			return null;
+		}
+
+		$side = (int) $value;
+
+		return $side >= 1 ? $side : null;
 	}
 }
