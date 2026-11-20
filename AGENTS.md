@@ -45,3 +45,7 @@ WordPress plugin that converts the image sizes WordPress generates into WebP and
 - A change to a public hook, setting, WP-CLI command or REST route updates `readme.txt` in the same commit.
 
 <!-- /bmad:context -->
+
+## Codex implementation handoff
+
+When running `bmad-build` in Codex, delegate implementation of approved specs and stories to the `amelia` subagent in `.codex/agents/amelia.toml`. Keep planning and final review with the parent agent. If the session can spawn subagents but cannot select a named role, spawn Amelia with `gpt-6.1-sol`, medium reasoning effort, and the profile's instructions.
