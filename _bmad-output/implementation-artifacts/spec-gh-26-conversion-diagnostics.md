@@ -24,12 +24,12 @@ context:
 ## Boundaries & Constraints
 
 **Always:**
-- Enable only with `update_option( 'trust_optimize_diagnostics', '1', false )`. On only when `get_option` returns the string `1`. Absent and every other returned value are off. A same-request cache may still hold an integer or boolean after writing one; that stays off. The option is its own row, not a key of `trust_optimize_options`, and the settings form does not touch it.
-- Off does no diagnostic file I/O and no diagnostic-only measurement.
+- Recording is on when `trust_optimize_diagnostics` is absent and when `get_option` returns the string `1`. The stored string `0` is off and survives updates. The existing settings screen checkbox "Keep diagnostic logs" writes that option, not a key of `trust_optimize_options`.
+- Off does no new diagnostic measurement and no new event. Existing files stay. Periodic age cleanup still runs.
 - `variant_start` is flushed after the source exists and before `get_editor_for_target_mime()`. `variant_result` records this call's status and reason. Match the variant row only when this attempt completed the transition (`done`, `not_smaller`, and `fail()` that updated the row). `not_pending`, `attempt_lost`, and `row_gone` are logged as returned and are not compared to the row. The writer updates no variant or attachment row.
 - `conversion_id` is a fresh 16 random bytes per variant attempt, shared by that start and result, not stored, not an auth token, not a hash of the other fields.
 - Directory is `wp_upload_dir()['basedir'] . '/to-logs'`, with `.htaccess`, `web.config`, and `index.php`. No secret directory. Never emit a URL.
-- Caps: 1280-byte line (skip the whole line if longer), 8 MiB file, 64 MiB site. Size is checked on every write under the lock by deleting oldest rotated files. Age cleanup is at most hourly on `admin_init` for `manage_options` and on uninstall, not on every write. Rotated names are unique within one second.
+- Caps: 1280-byte line (skip the whole line if longer), 8 MiB file, 512 MiB site. Size is checked on every write under the lock by deleting oldest rotated files. Age cleanup is at most hourly on `admin_init` for `manage_options` and on uninstall, not on every write. Rotated names are unique within one second.
 - Lock try is non-blocking. If it fails, skip the line. Do not hold the lock across the editor or the encoder. Writer time stays inside the existing deadline at `AttachmentProcessor::convert_pending()`; do not add it back.
 - A recording error is caught inside the writer and does not reach `convert_claimed()`.
 - Uninstall deletes `to-logs` only when `remove_data_on_uninstall` is set and this request drops the site's options, directory first. An early stop that keeps the tables keeps `to-logs`.
@@ -52,7 +52,7 @@ context:
 | Unmatched return | `not_pending`, `attempt_lost`, or `row_gone` | Logged as returned. Row need not show that reason. Writer issues no row update | N/A |
 | Lock busy | `write.lock` already held | Returns at once, no new line, variant matches off | N/A |
 | Write error | `to-logs` unwritable | Variant matches off. No exception escapes | Swallowed in the writer |
-| Cap | Site over 64 MiB of rotated files | Oldest rotated file deleted, line appended, variant unchanged. Age cleanup not run by this write | N/A |
+| Cap | Site over 512 MiB of rotated files | Oldest rotated file deleted, line appended, variant unchanged. Age cleanup not run by this write | N/A |
 | Age | File mtime 61 days | Direct age cleanup deletes it. No Action Scheduler action | N/A |
 | Line | Payload over 1280 bytes | Not appended. Previous line still valid JSON | Skip the write |
 | Fields | `missing_file` | Reason code present. No path, URL, file name, `message`, or attempt token | N/A |

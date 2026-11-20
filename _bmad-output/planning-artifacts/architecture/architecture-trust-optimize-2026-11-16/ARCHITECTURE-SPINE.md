@@ -360,16 +360,14 @@ flowchart TD
 ### AD-18 — Diagnostics go to private files, never into decisions
 
 - **Binds:** processing, gate, pacing, admin, uninstall, #26, #31, #32
-- **Prevents:** logs exposed by URL or carrying user data; logging failures changing behavior; event streams bloating the database.
+- **Prevents:** logs carrying secrets, paths, image names, or free text; a recording failure changing a conversion; an update turning a saved off back on; the event stream in the database.
 - **Rule:**
-  - **What.** Opt-in JSONL diagnostics per site:
-    - the gate decision before a conversion and the result after it (the start record is written separately, so a killed worker leaves a trace);
-    - pace changes;
-    - the environment and settings at job start and whenever they change.
-  - **Privacy.** Files are not reachable by URL. They hold IDs and numbers only: no user data, URLs, image names or secrets.
-  - **Retention.** Rotation, 30-day default retention and a per-site size cap. "Clear logs" deletes only these files.
-  - **Isolation.** A failed log write never changes a conversion decision.
-  - **DB vs files.** The database keeps only job state and summary metrics (AD-17).
+  - **What.** JSONL diagnostics per site. A recorded conversion writes a start line flushed before the heavy call and a result line for what that call returned. The start line does not say why a process stopped. Pace and gate lines are written only by those features.
+  - **Switch.** The option is `trust_optimize_diagnostics`, its own row, not a key of `trust_optimize_options`. Recording is on when the row is absent and when `get_option` returns the string `1`. The stored string `0` is off. A checkbox on the existing settings screen writes `'1'` or `'0'`. A saved `0` stays through later updates. While off, code whose only purpose is a diagnostic record does not run and does not write a new event. Existing files stay. Periodic age cleanup still runs.
+  - **Privacy.** Files live in that site's `uploads/to-logs`. The plugin writes the usual deny files and never emits a URL. A server that ignores those files can still serve the directory; that residual risk is accepted. The files hold ids, reason codes, and numbers only.
+  - **Retention.** Files are kept 60 days from their last write. Starting caps are 512 MiB per site and 8 MiB per file. They are maxima, so a busy site keeps less than 60 days. The size cap is checked on every write. Age cleanup is periodic and does not depend on Action Scheduler. Uninstall deletes `to-logs` only when remove-data is set and that request drops the site's options.
+  - **Isolation.** A recording failure, including a lock that is not acquired, does not interrupt a conversion or change its outcome. Writer time stays inside the worker deadline. `conversion_id` joins a start to its result, authorizes nothing, and is not stored.
+  - **DB vs files.** The database keeps only job state and summary metrics (AD-17). A missing or skipped line is not a cause.
 
 ## Consistency Conventions
 

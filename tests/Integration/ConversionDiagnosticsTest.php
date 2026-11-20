@@ -186,6 +186,7 @@ class ConversionDiagnosticsTest extends WP_UnitTestCase {
 	}
 
 	public function test_off_creates_no_directory_and_matches_a_converter_without_a_writer() {
+		update_option( ConversionDiagnostics::OPTION, '0', false );
 		$counter = $this->counting_writer();
 		$with    = $this->converter( $counter );
 		$without = $this->converter( null );
@@ -204,7 +205,14 @@ class ConversionDiagnosticsTest extends WP_UnitTestCase {
 		$done_without = $this->variants->get_for_attachment( 502 )[0];
 		$this->assertSame( $done_without['status'], $done_with['status'] );
 		$this->assertSame( $done_without['file_size'], $done_with['file_size'] );
-		$this->assertStringNotContainsString( 'diagnostics', $this->settings_html() );
+
+		$old = $this->logs_dir();
+		wp_mkdir_p( $old );
+		$file = $old . '/2000-01-01.jsonl';
+		file_put_contents( $file, "{}\n" );
+		touch( $file, time() - ( 61 * DAY_IN_SECONDS ) );
+		$this->counting_writer()->prune_old_files();
+		$this->assertFileDoesNotExist( $file );
 	}
 
 	public function test_only_the_string_one_enables_recording() {
@@ -227,7 +235,7 @@ class ConversionDiagnosticsTest extends WP_UnitTestCase {
 			$this->assertFalse( $writer->is_enabled(), $value );
 		}
 		delete_option( ConversionDiagnostics::OPTION );
-		$this->assertFalse( $writer->is_enabled() );
+		$this->assertTrue( $writer->is_enabled() );
 
 		update_option( ConversionDiagnostics::OPTION, 1, false );
 		$got = get_option( ConversionDiagnostics::OPTION );
@@ -239,6 +247,54 @@ class ConversionDiagnosticsTest extends WP_UnitTestCase {
 		if ( '1' !== $got ) {
 			$this->assertFalse( $writer->is_enabled() );
 		}
+	}
+
+	public function test_settings_form_saves_on_and_off_and_keeps_a_saved_off() {
+		if ( ! isset( get_registered_settings()['trust_optimize_diagnostics'] ) ) {
+			Plugin::get_instance()->admin->register_settings();
+		}
+
+		$allowed = apply_filters( 'allowed_options', array() );
+		$this->assertContains( 'trust_optimize_diagnostics', $allowed['trust_optimize_settings'] );
+
+		delete_option( ConversionDiagnostics::OPTION );
+		$html = $this->settings_html();
+		$this->assertMatchesRegularExpression(
+			'/id="trust_optimize_diagnostics"[^>]*checked/',
+			$html
+		);
+		$this->assertStringContainsString( 'value="0"', $html );
+		$this->assertStringContainsString( 'uploads/to-logs', $html );
+		$this->assertStringContainsString( '60 days', $html );
+		$this->assertStringContainsString( '512 MB', $html );
+
+		$this->post_diagnostics( '0' );
+		$this->assertSame( '0', get_option( ConversionDiagnostics::OPTION ) );
+		$this->assertFalse( ( new ConversionDiagnostics( new Settings() ) )->is_enabled() );
+		$html = $this->settings_html();
+		$this->assertDoesNotMatchRegularExpression(
+			'/id="trust_optimize_diagnostics"[^>]*checked/',
+			$html
+		);
+
+		$this->post_diagnostics( '1' );
+		$this->assertSame( '1', get_option( ConversionDiagnostics::OPTION ) );
+		$this->assertTrue( ( new ConversionDiagnostics( new Settings() ) )->is_enabled() );
+
+		update_option( 'trust_optimize_options', ( new Settings() )->sanitize( array( 'convert_to_webp' => 1 ) ) );
+		$this->post_diagnostics( '0' );
+		$this->assertSame( '0', get_option( ConversionDiagnostics::OPTION ) );
+		$stored = get_option( 'trust_optimize_options' );
+		$this->assertArrayNotHasKey( 'trust_optimize_diagnostics', $stored );
+	}
+
+	/**
+	 * Same write options.php performs for one whitelisted option.
+	 *
+	 * @param string $posted Posted checkbox value.
+	 */
+	private function post_diagnostics( $posted ) {
+		update_option( ConversionDiagnostics::OPTION, wp_unslash( $posted ) );
 	}
 
 	public function test_start_is_flushed_before_the_editor_loads() {
@@ -429,8 +485,10 @@ class ConversionDiagnosticsTest extends WP_UnitTestCase {
 		$dir    = $this->logs_dir();
 		wp_mkdir_p( $dir );
 		$oldest = null;
-		for ( $i = 0; $i < 9; $i++ ) {
-			$path = $dir . '/20200101T00000' . $i . '.000000Z.jsonl';
+		// One more full file than the site cap, so the next line must drop the oldest.
+		$files = (int) floor( ConversionDiagnostics::SITE_MAX / ConversionDiagnostics::FILE_MAX ) + 1;
+		for ( $i = 0; $i < $files; $i++ ) {
+			$path = $dir . '/20200101T' . sprintf( '%06d', $i ) . '.000000Z.jsonl';
 			$fh   = fopen( $path, 'wb' );
 			ftruncate( $fh, ConversionDiagnostics::FILE_MAX );
 			fclose( $fh );
@@ -588,7 +646,8 @@ class ConversionDiagnosticsTest extends WP_UnitTestCase {
 		update_option( ConversionDiagnostics::OPTION, '1', false );
 		$this->convert_row( $this->converter( $this->counting_writer() ), $this->pending_jpeg( 'url.jpg', 516 ) );
 		$html = $this->settings_html();
-		$this->assertStringNotContainsString( 'to-logs', $html );
+		$this->assertDoesNotMatchRegularExpression( '#https?://[^\\s"\']*to-logs#', $html );
+		$this->assertStringContainsString( 'uploads/to-logs', $html );
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
 		$response = rest_do_request( new WP_REST_Request( 'GET', '/trust-optimize/v1/status' ) );
 		$this->assertStringNotContainsString( 'to-logs', wp_json_encode( $response->get_data() ) );

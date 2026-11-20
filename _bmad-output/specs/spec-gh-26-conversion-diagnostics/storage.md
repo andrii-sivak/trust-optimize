@@ -18,14 +18,14 @@ Those files help where the server honors them. Where the server serves `uploads/
 | --- | --- | --- |
 | Line | 1280 bytes | Fits the agreed fields. A longer line is skipped whole |
 | Active file | 8 MiB | Owner's starting maximum. Then a rename |
-| Site total | 64 MiB | Owner's starting maximum. A busy site keeps less than 60 days |
+| Site total | 512 MiB | Owner's maximum. A busy site keeps less than 60 days |
 | Age | 60 days | Owner's figure, from file mtime. Not a second, shorter clock |
 
 The full result example in `events.md` encodes to 846 bytes. The same keys with a 100-character size, a 64-character reason, an 80-character editor class, and 64-bit integers encode to 1187 bytes. 1280 sits above that. Required keys are not dropped to squeeze a line in, and a partial JSON line is not written.
 
 The active file is `YYYY-MM-DD.jsonl` in UTC. The first write of a new UTC day leaves yesterday's file closed, so its mtime can age out. When the active file reaches 8 MiB, the writer, holding the lock, renames it and opens a new active file. The new name is `YYYYMMDDTHHMMSS.uuuuuuZ.jsonl`. If that path exists, the writer appends `-2`, `-3`, and so on before the rename. Two rotations in the same second therefore differ. Deny files and `write.lock` do not count toward the cap and are not deleted for age or size.
 
-On every write, after the lock is held, the writer sums `*.jsonl` and deletes whole rotated files, oldest first, until the line it is about to append fits under 64 MiB. It does not delete or rename the active file it has open for this append. It does not run the 60-day delete on that path. If the line still cannot be stored, the write is skipped and the conversion continues.
+On every write, after the lock is held, the writer sums `*.jsonl` and deletes whole rotated files, oldest first, until the line it is about to append fits under 512 MiB. It does not delete or rename the active file it has open for this append. It does not run the 60-day delete on that path. If the line still cannot be stored, the write is skipped and the conversion continues.
 
 ## Writes
 
@@ -41,7 +41,7 @@ Seconds spent in the writer are part of the worker's existing deadline. The proc
 
 Age cleanup deletes `*.jsonl` whose mtime is older than 60 days. It runs at most once an hour from `admin_init` when the current user can `manage_options`, using the option `trust_optimize_log_pruned_at` (autoload off, UTC mysql), and it runs from uninstall. It does not run on every diagnostics write. It takes the same non-blocking lock; if the lock is busy, that pass does nothing. It is not an Action Scheduler action, and nothing schedules one.
 
-A site that never opens wp-admin can keep files past 60 days until uninstall or the next admin load. The 64 MiB cap still applies on the next write. Deactivation does not delete the directory.
+A site that never opens wp-admin can keep files past 60 days until uninstall or the next admin load. The 512 MiB cap still applies on the next write. Deactivation does not delete the directory.
 
 Turning the flag off does not delete files. Age cleanup on `admin_init` still runs, and it does not sample CPU, PHP memory, or the cgroup.
 
@@ -54,14 +54,14 @@ These are the acceptance checks. They do not need the resource gate or a new ima
 | Check | What passes |
 | --- | --- |
 | Off | Option absent. Convert the test JPEG. No `to-logs` directory. A subclass that counts cgroup reads and `getrusage` samples stays at zero. Variant status and bytes match a run with the writer not constructed. The settings screen has no diagnostics checkbox |
-| Flag | Enable with `update_option( 'trust_optimize_diagnostics', '1', false )`. In that request `get_option` returns the string `1` and a conversion writes a line. After `update_option` of integer `1` or `true` in the same request, `get_option` may still return that original type; the reader stays off, and the test does not require a string back. The strings `0`, `yes`, and `true`, and an absent row, stay off. Saving the settings form does not create, change, or delete the row |
+| Flag | A missing option and the string `1` write a line. The stored string `0` does not, and age cleanup still deletes an old file. The settings form checkbox is checked when the option is missing and unchecked when it is `0`. Posting `0` and `1` through the registered setting stores those strings. Saving the other settings leaves a stored `0` in place and does not copy the key into `trust_optimize_options` |
 | Budget | After a write, the worker deadline is the same value it had before the write. It is not increased by the writer's duration |
 | Start is early | A test editor's load reads the log. The start line is already complete and contains `conversion_id`. The result line after load repeats that id. Neither the variant row nor any option contains the id |
 | Row match | A `done` or `not_smaller` result from this call matches the variant row's status and reason. `not_pending`, `attempt_lost`, and `row_gone` are logged as the call returned them, and the test does not require the row to show that reason. The writer performs no variant or attachment update |
 | Lock busy | Hold `write.lock` in the test. The writer returns without a new line and without blocking the test's lock holder. The variant status matches the off run |
 | Write error | Replace `to-logs` with a file, or make it unwritable. The conversion status, reason, and output bytes match the off run. The test fails if an exception escapes |
 | Names | Two rotations performed in the same UTC second produce two different file names, and both names end in `.jsonl` |
-| Cap | Fill the site past 64 MiB with rotated files. The next write, holding the lock, removes the oldest rotated file and still appends. The variant status matches the off run. Age cleanup is not invoked by that write |
+| Cap | Fill the site past 512 MiB with rotated files. The next write, holding the lock, removes the oldest rotated file and still appends. The variant status matches the off run. Age cleanup is not invoked by that write |
 | Age | A JSONL file with mtime 61 days ago is removed by a direct age-cleanup call. A file one day old remains. The Action Scheduler table gains no `trust-optimize` action from that call |
 | Line | A payload that encodes over 1280 bytes is not appended. The file's last line is still valid JSON. No key is removed from a line that was written |
 | Fields | A `missing_file` result contains the reason code and does not contain a path, a URL, a file name, or a `message` key. The attempt token is absent |

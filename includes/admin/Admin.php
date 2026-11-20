@@ -10,6 +10,7 @@ namespace TrustOptimize\Admin;
 use TrustOptimize\Bulk\BulkJob;
 use TrustOptimize\Bulk\EligibilityQuery;
 use TrustOptimize\Capabilities\CapabilityService;
+use TrustOptimize\Diagnostics\ConversionDiagnostics;
 use TrustOptimize\Bulk\BulkProducer;
 use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Domain\JobStatus;
@@ -209,6 +210,16 @@ class Admin {
 			array( 'sanitize_callback' => array( $this->settings, 'sanitize' ) )
 		);
 
+		// Its own row, so a saved "0" is not dropped when the main settings array is sanitized.
+		register_setting(
+			'trust_optimize_settings',
+			'trust_optimize_diagnostics',
+			array(
+				'sanitize_callback' => array( $this, 'sanitize_diagnostics' ),
+				'autoload'          => false,
+			)
+		);
+
 		foreach ( $this->get_sections() as $id => $title ) {
 			add_settings_section( 'trust_optimize_' . $id . '_section', $title, '', 'trust_optimize_settings' );
 		}
@@ -229,6 +240,15 @@ class Admin {
 				)
 			);
 		}
+
+		add_settings_field(
+			'trust_optimize_diagnostics',
+			__( 'Keep diagnostic logs', 'trust-optimize' ),
+			array( $this, 'render_diagnostics_field' ),
+			'trust_optimize_settings',
+			'trust_optimize_limits_section',
+			array( 'label_for' => 'trust_optimize_diagnostics' )
+		);
 
 		add_settings_field(
 			'recheck_capabilities',
@@ -324,6 +344,33 @@ class Admin {
 				'description' => __( 'Delete the generated files and the plugin data when the plugin is deleted. Originals are never deleted.', 'trust-optimize' ),
 			),
 		);
+	}
+
+	/**
+	 * Store the diagnostics checkbox as the string "1" or "0".
+	 *
+	 * An unchecked box posts the hidden "0". Anything other than "1" is stored as "0",
+	 * so an explicit off survives later plugin updates.
+	 *
+	 * @param mixed $value Posted value.
+	 * @return string
+	 */
+	public function sanitize_diagnostics( $value ) {
+		return '1' === $value || 1 === $value || true === $value ? '1' : '0';
+	}
+
+	/**
+	 * Checkbox for trust_optimize_diagnostics. A missing option is shown as on.
+	 */
+	public function render_diagnostics_field() {
+		$on = ( new ConversionDiagnostics( $this->settings ) )->is_enabled();
+
+		echo '<input type="hidden" name="trust_optimize_diagnostics" value="0">';
+		printf(
+			'<input type="checkbox" id="trust_optimize_diagnostics" name="trust_optimize_diagnostics" value="1" %s>',
+			checked( $on, true, false )
+		);
+		echo '<p class="description">' . esc_html__( 'Logs are stored in uploads/to-logs and kept for up to 60 days, with a total limit of 512 MB. When the limit is reached, older files are deleted sooner.', 'trust-optimize' ) . '</p>';
 	}
 
 	/**

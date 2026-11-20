@@ -31,7 +31,7 @@ class ConversionDiagnostics {
 	const DIRECTORY    = 'to-logs';
 	const LINE_MAX     = 1280;
 	const FILE_MAX     = 8388608;
-	const SITE_MAX     = 67108864;
+	const SITE_MAX     = 536870912; // 512 MiB.
 	const RETENTION    = 60;
 
 	/**
@@ -93,17 +93,26 @@ class ConversionDiagnostics {
 	}
 
 	/**
-	 * Whether recording is on. Only the string 1 that get_option returns is on.
+	 * Whether recording is on.
+	 *
+	 * A missing row and the string "1" are on. The stored string "0" is off.
+	 * Any other stored value is off. A failure to read the option is off.
 	 *
 	 * @return bool
 	 */
 	public function is_enabled() {
 		try {
-			return '1' === get_option( self::OPTION );
+			$value = get_option( self::OPTION );
 		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
 			unset( $throwable );
 			return false;
 		}
+
+		if ( false === $value ) {
+			return true;
+		}
+
+		return '1' === $value;
 	}
 
 	/**
