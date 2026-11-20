@@ -8,6 +8,7 @@
 namespace TrustOptimize\Features\Optimization;
 
 use stdClass;
+use Throwable;
 use TrustOptimize\Capabilities\CapabilityService;
 use TrustOptimize\Diagnostics\ConversionDiagnostics;
 use TrustOptimize\Domain\VariantStatus;
@@ -100,13 +101,26 @@ class ImageConverter {
 	 * @return OptimizeResult Success (done), skipped (reason in message; row_gone when the row was removed meanwhile, attempt_lost when the attempt no longer holds the attachment) or failed (reason in message; publish_incomplete when the file may be in place but its row is not done, which leaves the lease held). Data 'lease_kept' when the lease could not be released.
 	 */
 	public function convert( array $variant_row, OptimizationSettings $settings, $token ) {
-		$session = ( null !== $this->diagnostics && $this->diagnostics->is_enabled() )
-			? $this->diagnostics->begin_variant( $variant_row, $settings )
-			: null;
-		$result  = $this->convert_variant( $variant_row, $settings, $token, $session );
+		$session = null;
+		if ( null !== $this->diagnostics ) {
+			try {
+				$session = $this->diagnostics->is_enabled()
+					? $this->diagnostics->begin_variant( $variant_row, $settings )
+					: null;
+			} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+				unset( $throwable );
+				$session = null;
+			}
+		}
+
+		$result = $this->convert_variant( $variant_row, $settings, $token, $session );
 
 		if ( $session ) {
-			$this->diagnostics->record_result( $session, $result );
+			try {
+				$this->diagnostics->record_result( $session, $result );
+			} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+				unset( $throwable );
+			}
 		}
 
 		return $result;
@@ -153,7 +167,11 @@ class ImageConverter {
 		$quality     = $settings->quality_for( $format );
 
 		if ( $session ) {
-			$this->diagnostics->record_start( $session, $source_size );
+			try {
+				$this->diagnostics->record_start( $session, $source_size );
+			} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+				unset( $throwable );
+			}
 		}
 
 		$editor = $this->timed(
@@ -226,6 +244,7 @@ class ImageConverter {
 			$session->output_bytes     = $file_size;
 			$session->editor           = get_class( $editor );
 			$session->quality_reported = $applied;
+			$session->result_reason    = $quality_note;
 		}
 
 		if ( $file_size >= $source_size ) {

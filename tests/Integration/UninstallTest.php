@@ -198,6 +198,20 @@ class UninstallTest extends WP_UnitTestCase {
 		$this->assertFalse( get_option( 'trust_optimize_pending_cleanup', false ) );
 	}
 
+	public function test_uninstall_does_not_follow_a_symlink_inside_to_logs() {
+		$outside = wp_upload_dir()['basedir'] . '/' . $this->relative_dir . '-outside';
+		$this->outside_dir = $outside;
+		wp_mkdir_p( $outside );
+		file_put_contents( $outside . '/kept.txt', 'keep' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		$this->plant_logs();
+		$this->assertTrue( symlink( $outside, $this->logs_dir() . '/alias' ) );
+
+		trust_optimize_uninstall_site();
+
+		$this->assertFileExists( $outside . '/kept.txt', 'Uninstall does not recurse through a symlink.' );
+		$this->assertDirectoryDoesNotExist( $this->logs_dir() );
+	}
+
 	/**
 	 * This site's conversion diagnostics directory.
 	 *
@@ -221,10 +235,10 @@ class UninstallTest extends WP_UnitTestCase {
 	 */
 	private function delete_logs() {
 		$dir = $this->logs_dir();
-		if ( ! file_exists( $dir ) ) {
+		if ( ! file_exists( $dir ) && ! is_link( $dir ) ) {
 			return;
 		}
-		if ( ! is_dir( $dir ) ) {
+		if ( is_link( $dir ) || ! is_dir( $dir ) ) {
 			unlink( $dir );
 			return;
 		}
@@ -235,7 +249,7 @@ class UninstallTest extends WP_UnitTestCase {
 					continue;
 				}
 				$path = $dir . '/' . $item;
-				if ( is_file( $path ) ) {
+				if ( is_link( $path ) || is_file( $path ) ) {
 					unlink( $path );
 				}
 			}

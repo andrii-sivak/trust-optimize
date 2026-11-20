@@ -199,7 +199,9 @@ function trust_optimize_delete_to_logs() {
 		return;
 	}
 
-	if ( is_dir( $dir ) ) {
+	if ( is_link( $dir ) ) {
+		wp_delete_file( $dir );
+	} elseif ( is_dir( $dir ) ) {
 		trust_optimize_delete_tree( $dir );
 	} else {
 		wp_delete_file( $dir );
@@ -227,7 +229,9 @@ function trust_optimize_delete_tree( $dir ) {
 		}
 
 		$path = $dir . '/' . $item;
-		if ( is_dir( $path ) ) {
+		if ( is_link( $path ) ) {
+			wp_delete_file( $path );
+		} elseif ( is_dir( $path ) ) {
 			trust_optimize_delete_tree( $path );
 		} else {
 			wp_delete_file( $path );

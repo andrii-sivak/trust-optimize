@@ -69,6 +69,16 @@ class TrustOptimizeCountingDiagnostics extends ConversionDiagnostics {
 }
 
 /**
+ * GD editor that reports a quality different from the requested setting.
+ */
+class TrustOptimizeQualityProbeEditor extends WP_Image_Editor_GD {
+
+	public function get_quality() {
+		return 77;
+	}
+}
+
+/**
  * GD editor whose load() reads the diagnostics file.
  */
 class TrustOptimizeDiagnosticsProbeEditor extends WP_Image_Editor_GD {
@@ -515,8 +525,10 @@ class ConversionDiagnosticsTest extends WP_UnitTestCase {
 			public $deadline;
 			protected function append( array $payload ) {
 				$this->before = $this->deadline->getValue( $this->processor );
-				parent::append( $payload );
-				$this->after = $this->deadline->getValue( $this->processor );
+				$ok           = parent::append( $payload );
+				$this->after  = $this->deadline->getValue( $this->processor );
+
+				return $ok;
 			}
 		};
 		$plugin    = Plugin::get_instance();
@@ -608,6 +620,82 @@ class ConversionDiagnosticsTest extends WP_UnitTestCase {
 		$this->assertDirectoryDoesNotExist( $other_dir );
 	}
 
+	public function test_a_diagnostics_throw_does_not_fail_the_variant() {
+		update_option( ConversionDiagnostics::OPTION, '1', false );
+		$writer = new class( new Settings() ) extends ConversionDiagnostics {
+			public function record_start( $session, $source_bytes ) {
+				throw new RuntimeException( 'diagnostics exploded' );
+			}
+		};
+		$result = $this->convert_row( $this->converter( $writer ), $this->pending_jpeg( 'throw.jpg', 521 ) );
+		$this->assertTrue( $result->is_success() );
+		$this->assertSame( VariantStatus::DONE, $this->variants->get_for_attachment( 521 )[0]['status'] );
+	}
+
+	public function test_environment_hash_is_remembered_only_after_a_successful_write() {
+		update_option( ConversionDiagnostics::OPTION, '1', false );
+		$writer = new class( new Settings() ) extends ConversionDiagnostics {
+			public $env_attempts = 0;
+			public function write_event( array $payload ) {
+				if ( 'environment' === ( $payload['event'] ?? '' ) ) {
+					++$this->env_attempts;
+					if ( 1 === $this->env_attempts ) {
+						return false;
+					}
+				}
+
+				return parent::write_event( $payload );
+			}
+		};
+		$this->convert_row( $this->converter( $writer ), $this->pending_jpeg( 'env-a.jpg', 522 ) );
+		$this->convert_row( $this->converter( $writer ), $this->pending_jpeg( 'env-b.jpg', 523 ) );
+		$this->assertSame( 2, $writer->env_attempts );
+		$this->assertCount( 1, $this->events_of( 'environment' ) );
+	}
+
+	public function test_a_symlink_to_logs_is_not_used() {
+		$target = $this->dir . '/log-target';
+		wp_mkdir_p( $target );
+		file_put_contents( $target . '/keep.txt', 'keep' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		$this->assertTrue( symlink( $target, $this->logs_dir() ) );
+		update_option( ConversionDiagnostics::OPTION, '1', false );
+		$this->convert_row( $this->converter( $this->counting_writer() ), $this->pending_jpeg( 'link.jpg', 524 ) );
+		$this->assertSame( VariantStatus::DONE, $this->variants->get_for_attachment( 524 )[0]['status'] );
+		$this->assertSame( array( 'keep.txt' ), array_values( array_diff( scandir( $target ), array( '.', '..' ) ) ) );
+		unlink( $target . '/keep.txt' );
+		rmdir( $target );
+	}
+
+	public function test_a_planner_skip_from_the_queue_is_not_a_start() {
+		update_option( ConversionDiagnostics::OPTION, '1', false );
+		$id       = $this->upload_jpeg();
+		$metadata = wp_get_attachment_metadata( $id );
+		wp_update_attachment_metadata( $id, array_merge( $metadata, array( 'width' => 12000, 'height' => 12000 ) ) );
+		add_filter( 'trust_optimize_max_pixels', static fn() => 100 );
+		$this->delete_logs();
+		Plugin::get_instance()->conversion_queue->plan_and_enqueue( $id );
+		$this->assertSame( array(), $this->events_of( 'variant_start' ) );
+		$skip = $this->events_of( 'attachment_skip' );
+		$this->assertCount( 1, $skip );
+		$this->assertSame( 'too_large', $skip[0]['reason'] );
+	}
+
+	public function test_quality_applied_on_the_row_is_on_the_result_line() {
+		update_option( ConversionDiagnostics::OPTION, '1', false );
+		add_filter(
+			'wp_image_editors',
+			static function () {
+				return array( TrustOptimizeQualityProbeEditor::class );
+			}
+		);
+		$this->convert_row( $this->converter( $this->counting_writer() ), $this->pending_jpeg( 'q.jpg', 525 ) );
+		$stored = $this->variants->get_for_attachment( 525 )[0];
+		$event  = $this->events_of( 'variant_result' )[0];
+		$this->assertSame( 'quality_applied:77', $stored['reason'] );
+		$this->assertSame( $stored['reason'], $event['reason'] );
+		$this->assertSame( 'done', $event['status'] );
+	}
+
 	public function test_a_second_attempt_gets_a_new_conversion_id() {
 		update_option( ConversionDiagnostics::OPTION, '1', false );
 		$row    = $this->pending_jpeg( 'again.jpg', 518 );
@@ -629,10 +717,10 @@ class ConversionDiagnosticsTest extends WP_UnitTestCase {
 
 	private function delete_logs() {
 		$dir = $this->logs_dir();
-		if ( ! file_exists( $dir ) ) {
+		if ( ! file_exists( $dir ) && ! is_link( $dir ) ) {
 			return;
 		}
-		if ( ! is_dir( $dir ) ) {
+		if ( is_link( $dir ) || ! is_dir( $dir ) ) {
 			unlink( $dir );
 			return;
 		}
@@ -643,7 +731,7 @@ class ConversionDiagnosticsTest extends WP_UnitTestCase {
 					continue;
 				}
 				$path = $dir . '/' . $item;
-				if ( is_file( $path ) ) {
+				if ( is_link( $path ) || is_file( $path ) ) {
 					unlink( $path );
 				}
 			}

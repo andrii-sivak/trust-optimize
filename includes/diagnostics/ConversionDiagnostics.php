@@ -98,7 +98,12 @@ class ConversionDiagnostics {
 	 * @return bool
 	 */
 	public function is_enabled() {
-		return '1' === get_option( self::OPTION );
+		try {
+			return '1' === get_option( self::OPTION );
+		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			unset( $throwable );
+			return false;
+		}
 	}
 
 	/**
@@ -120,9 +125,13 @@ class ConversionDiagnostics {
 	 * @param string|null $attempt_source queue or sync.
 	 */
 	public function set_attempt_context( $job_id, $attempt, $attempt_source ) {
-		$this->job_id         = null === $job_id || '' === $job_id ? null : (int) $job_id;
-		$this->attempt        = (int) $attempt;
-		$this->attempt_source = is_string( $attempt_source ) && '' !== $attempt_source ? $attempt_source : null;
+		try {
+			$this->job_id         = null === $job_id || '' === $job_id ? null : (int) $job_id;
+			$this->attempt        = (int) $attempt;
+			$this->attempt_source = is_string( $attempt_source ) && '' !== $attempt_source ? $attempt_source : null;
+		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			unset( $throwable );
+		}
 	}
 
 	/**
@@ -133,28 +142,34 @@ class ConversionDiagnostics {
 	 * @return stdClass|null Session when recording is on.
 	 */
 	public function begin_variant( array $variant_row, OptimizationSettings $settings ) {
-		if ( ! $this->is_enabled() ) {
+		try {
+			if ( ! $this->is_enabled() ) {
+				return null;
+			}
+
+			$session                       = new stdClass();
+			$session->conversion_id        = bin2hex( random_bytes( 16 ) );
+			$session->row                  = $variant_row;
+			$session->settings             = $settings;
+			$session->source_bytes         = null;
+			$session->started              = false;
+			$session->editor               = null;
+			$session->quality_reported     = null;
+			$session->output_bytes         = null;
+			$session->result_reason        = null;
+			$session->wall_load_ms         = null;
+			$session->wall_encode_ms       = null;
+			$session->cpu_load_user_ms     = null;
+			$session->cpu_load_system_ms   = null;
+			$session->cpu_encode_user_ms   = null;
+			$session->cpu_encode_system_ms = null;
+			$session->cpu                  = null;
+
+			return $session;
+		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			unset( $throwable );
 			return null;
 		}
-
-		$session                       = new stdClass();
-		$session->conversion_id        = bin2hex( random_bytes( 16 ) );
-		$session->row                  = $variant_row;
-		$session->settings             = $settings;
-		$session->source_bytes         = null;
-		$session->started              = false;
-		$session->editor               = null;
-		$session->quality_reported     = null;
-		$session->output_bytes         = null;
-		$session->wall_load_ms         = null;
-		$session->wall_encode_ms       = null;
-		$session->cpu_load_user_ms     = null;
-		$session->cpu_load_system_ms   = null;
-		$session->cpu_encode_user_ms   = null;
-		$session->cpu_encode_system_ms = null;
-		$session->cpu                  = null;
-
-		return $session;
 	}
 
 	/**
@@ -163,7 +178,12 @@ class ConversionDiagnostics {
 	 * @return string 32 hex characters.
 	 */
 	public function conversion_id() {
-		return bin2hex( random_bytes( 16 ) );
+		try {
+			return bin2hex( random_bytes( 16 ) );
+		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			unset( $throwable );
+			return '';
+		}
 	}
 
 	/**
@@ -173,10 +193,14 @@ class ConversionDiagnostics {
 	 * @param int      $source_bytes Size already measured with wp_filesize.
 	 */
 	public function record_start( stdClass $session, $source_bytes ) {
-		$session->source_bytes = (int) $source_bytes;
-		$session->started      = true;
-		$this->maybe_write_environment();
-		$this->write_event( $this->variant_start_payload( $session ) );
+		try {
+			$session->source_bytes = (int) $source_bytes;
+			$session->started      = true;
+			$this->maybe_write_environment();
+			$this->write_event( $this->variant_start_payload( $session ) );
+		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			unset( $throwable );
+		}
 	}
 
 	/**
@@ -188,26 +212,39 @@ class ConversionDiagnostics {
 	 * @return mixed The call's return value.
 	 */
 	public function measure( stdClass $session, $phase, callable $work ) {
-		$before = $this->sample_rusage();
-		$start  = hrtime( true );
+		$before = null;
+		$start  = null;
+
+		try {
+			$before = $this->sample_rusage();
+			$start  = hrtime( true );
+		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			unset( $throwable );
+		}
+
 		$result = $work();
-		$ms     = (int) round( ( hrtime( true ) - $start ) / 1e6 );
 
-		$session->{"wall_{$phase}_ms"} = $ms;
+		try {
+			if ( null !== $start ) {
+				$session->{"wall_{$phase}_ms"} = (int) round( ( hrtime( true ) - $start ) / 1e6 );
+			}
 
-		if ( null === $before ) {
-			$session->cpu = 'unavailable';
-			return $result;
+			if ( null === $before ) {
+				$session->cpu = 'unavailable';
+				return $result;
+			}
+
+			$after = $this->sample_rusage();
+			if ( null === $after ) {
+				$session->cpu = 'unavailable';
+				return $result;
+			}
+
+			$session->{"cpu_{$phase}_user_ms"}   = $this->rusage_delta_ms( $before, $after, 'utime' );
+			$session->{"cpu_{$phase}_system_ms"} = $this->rusage_delta_ms( $before, $after, 'stime' );
+		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			unset( $throwable );
 		}
-
-		$after = $this->sample_rusage();
-		if ( null === $after ) {
-			$session->cpu = 'unavailable';
-			return $result;
-		}
-
-		$session->{"cpu_{$phase}_user_ms"}   = $this->rusage_delta_ms( $before, $after, 'utime' );
-		$session->{"cpu_{$phase}_system_ms"} = $this->rusage_delta_ms( $before, $after, 'stime' );
 
 		return $result;
 	}
@@ -219,7 +256,11 @@ class ConversionDiagnostics {
 	 * @param OptimizeResult $result  Return value of convert().
 	 */
 	public function record_result( stdClass $session, OptimizeResult $result ) {
-		$this->write_event( $this->variant_result_payload( $session, $result ) );
+		try {
+			$this->write_event( $this->variant_result_payload( $session, $result ) );
+		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			unset( $throwable );
+		}
 	}
 
 	/**
@@ -231,45 +272,56 @@ class ConversionDiagnostics {
 	 * @param int|null $source_h      Height the planner already had.
 	 */
 	public function record_attachment_skip( $attachment_id, $reason, $source_w, $source_h ) {
-		if ( ! $this->is_enabled() ) {
-			return;
-		}
+		try {
+			if ( ! $this->is_enabled() ) {
+				return;
+			}
 
-		$this->maybe_write_environment();
-		$this->write_event(
-			array(
-				'v'              => 1,
-				'event'          => 'attachment_skip',
-				'ts'             => current_time( 'mysql', true ),
-				'blog_id'        => get_current_blog_id(),
-				'job_id'         => $this->job_id,
-				'attachment_id'  => (int) $attachment_id,
-				'attempt'        => $this->attempt,
-				'attempt_source' => $this->attempt_source,
-				'conversion_id'  => $this->conversion_id(),
-				'reason'         => (string) $reason,
-				'source_w'       => $source_w,
-				'source_h'       => $source_h,
-				'source_bytes'   => null,
-				'env'            => $this->current_env_hash(),
-			)
-		);
+			$id = $this->conversion_id();
+			if ( '' === $id ) {
+				return;
+			}
+
+			$this->maybe_write_environment();
+			$this->write_event(
+				array(
+					'v'              => 1,
+					'event'          => 'attachment_skip',
+					'ts'             => current_time( 'mysql', true ),
+					'blog_id'        => get_current_blog_id(),
+					'job_id'         => $this->job_id,
+					'attachment_id'  => (int) $attachment_id,
+					'attempt'        => $this->attempt,
+					'attempt_source' => $this->attempt_source,
+					'conversion_id'  => $id,
+					'reason'         => (string) $reason,
+					'source_w'       => $source_w,
+					'source_h'       => $source_h,
+					'source_bytes'   => null,
+					'env'            => $this->current_env_hash(),
+				)
+			);
+		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			unset( $throwable );
+		}
 	}
 
 	/**
 	 * Append one event. Public so a test can drive the writer without an editor.
 	 *
 	 * @param array $payload Event fields.
+	 * @return bool True when the line was appended.
 	 */
 	public function write_event( array $payload ) {
-		if ( ! $this->is_enabled() ) {
-			return;
-		}
-
 		try {
-			$this->append( $payload );
+			if ( ! $this->is_enabled() ) {
+				return false;
+			}
+
+			return $this->append( $payload );
 		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
 			unset( $throwable );
+			return false;
 		}
 	}
 
@@ -280,7 +332,7 @@ class ConversionDiagnostics {
 	 */
 	public function prune_old_files() {
 		$dir = $this->directory();
-		if ( '' === $dir || ! is_dir( $dir ) ) {
+		if ( '' === $dir || is_link( $dir ) || ! is_dir( $dir ) ) {
 			return true;
 		}
 
@@ -292,7 +344,7 @@ class ConversionDiagnostics {
 		try {
 			$cutoff = time() - ( self::RETENTION * \DAY_IN_SECONDS );
 			foreach ( $this->jsonl_files( $dir ) as $path ) {
-				$mtime = filemtime( $path );
+				$mtime = $this->file_mtime( $path );
 				if ( false !== $mtime && $mtime < $cutoff ) {
 					wp_delete_file( $path );
 				}
@@ -351,57 +403,71 @@ class ConversionDiagnostics {
 	 * Append one encoded line under the lock.
 	 *
 	 * @param array $payload Event fields.
+	 * @return bool True when the line was appended.
 	 */
 	protected function append( array $payload ) {
 		$json = wp_json_encode( $payload );
 		if ( ! is_string( $json ) ) {
-			return;
+			return false;
 		}
 
 		$line = $json . "\n";
 		if ( strlen( $line ) > self::LINE_MAX ) {
-			return;
+			return false;
 		}
 
 		$dir = $this->ensure_directory();
 		if ( '' === $dir ) {
-			return;
+			return false;
 		}
 
 		$lock = $this->try_lock( $dir );
 		if ( null === $lock ) {
-			return;
+			return false;
 		}
 
 		try {
 			$this->enforce_site_cap( $dir, strlen( $line ) );
 			$path = $this->active_path( $dir );
-			if ( is_file( $path ) && filesize( $path ) + strlen( $line ) > self::FILE_MAX ) {
+			if ( is_link( $path ) ) {
+				return false;
+			}
+			$size = $this->file_size( $path );
+			if ( false !== $size && $size + strlen( $line ) > self::FILE_MAX ) {
 				$rotated = $this->rotated_path( $this->rotation_stem(), $dir );
 				if ( ! rename( $path, $rotated ) ) {
-					return;
+					return false;
 				}
 				$this->chmod_file( $rotated );
+				$path = $this->active_path( $dir );
+				$size = false;
 			}
 
 			$sum = $this->jsonl_bytes( $dir );
 			if ( $sum + strlen( $line ) > self::SITE_MAX ) {
-				return;
+				return false;
 			}
 
-			$handle = fopen( $this->active_path( $dir ), 'ab' );
+			$before = false === $size ? 0 : $size;
+			$handle = fopen( $path, 'ab' );
 			if ( false === $handle ) {
-				return;
+				return false;
 			}
 
 			$written = fwrite( $handle, $line );
-			fflush( $handle );
-			fclose( $handle );
-			$this->chmod_file( $this->active_path( $dir ) );
-
-			if ( false === $written || $written < strlen( $line ) ) {
-				return;
+			$ok      = false !== $written && strlen( $line ) === $written;
+			$flushed = $ok ? fflush( $handle ) : false;
+			if ( ! $ok || false === $flushed ) {
+				ftruncate( $handle, $before );
+				fflush( $handle );
+				fclose( $handle );
+				return false;
 			}
+
+			fclose( $handle );
+			$this->chmod_file( $path );
+
+			return true;
 		} finally {
 			$this->unlock( $lock );
 		}
@@ -513,8 +579,9 @@ class ConversionDiagnostics {
 		}
 
 		$payload['env'] = $hash;
-		$this->write_event( $payload );
-		$this->env_hash_by_job[ $key ] = $hash;
+		if ( $this->write_event( $payload ) ) {
+			$this->env_hash_by_job[ $key ] = $hash;
+		}
 	}
 
 	/**
@@ -571,7 +638,7 @@ class ConversionDiagnostics {
 	private function variant_result_payload( stdClass $session, OptimizeResult $result ) {
 		$row     = $session->row;
 		$status  = $result->is_success() ? 'done' : ( $result->is_failed() ? 'failed' : 'skipped' );
-		$reason  = $result->is_success() ? null : $result->get_message();
+		$reason  = $result->is_success() ? ( $session->result_reason ?? null ) : $result->get_message();
 		$payload = array(
 			'v'                 => 1,
 			'event'             => 'variant_result',
@@ -840,11 +907,15 @@ class ConversionDiagnostics {
 	 */
 	private function ensure_directory() {
 		$dir = $this->directory();
-		if ( '' === $dir ) {
+		if ( '' === $dir || is_link( $dir ) ) {
 			return '';
 		}
 
 		if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) {
+			return '';
+		}
+
+		if ( is_link( $dir ) || ! is_dir( $dir ) ) {
 			return '';
 		}
 
@@ -935,6 +1006,10 @@ class ConversionDiagnostics {
 				return;
 			}
 			wp_delete_file( $oldest );
+			clearstatcache( true, $oldest );
+			if ( file_exists( $oldest ) ) {
+				return;
+			}
 		}
 	}
 
@@ -952,7 +1027,7 @@ class ConversionDiagnostics {
 			if ( $path === $active ) {
 				continue;
 			}
-			$time = filemtime( $path );
+			$time = $this->file_mtime( $path );
 			if ( false === $time ) {
 				continue;
 			}
@@ -974,11 +1049,41 @@ class ConversionDiagnostics {
 	private function jsonl_bytes( $dir ) {
 		$total = 0;
 		foreach ( $this->jsonl_files( $dir ) as $path ) {
-			$size   = filesize( $path );
+			$size   = $this->file_size( $path );
 			$total += false === $size ? 0 : $size;
 		}
 
 		return $total;
+	}
+
+	/**
+	 * Size of a real (non-symlink) file, after clearing the stat cache for that path.
+	 *
+	 * @param string $path Absolute path.
+	 * @return int|false
+	 */
+	private function file_size( $path ) {
+		clearstatcache( true, $path );
+		if ( is_link( $path ) || ! is_file( $path ) ) {
+			return false;
+		}
+
+		return filesize( $path );
+	}
+
+	/**
+	 * Modification time of a real (non-symlink) file, after clearing the stat cache for that path.
+	 *
+	 * @param string $path Absolute path.
+	 * @return int|false
+	 */
+	private function file_mtime( $path ) {
+		clearstatcache( true, $path );
+		if ( is_link( $path ) || ! is_file( $path ) ) {
+			return false;
+		}
+
+		return filemtime( $path );
 	}
 
 	/**
@@ -989,8 +1094,18 @@ class ConversionDiagnostics {
 	 */
 	private function jsonl_files( $dir ) {
 		$files = glob( $dir . '/*.jsonl' );
+		if ( ! is_array( $files ) ) {
+			return array();
+		}
 
-		return is_array( $files ) ? $files : array();
+		return array_values(
+			array_filter(
+				$files,
+				static function ( $path ) {
+					return is_file( $path ) && ! is_link( $path );
+				}
+			)
+		);
 	}
 
 	/**

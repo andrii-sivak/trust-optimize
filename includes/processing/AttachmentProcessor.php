@@ -185,7 +185,7 @@ class AttachmentProcessor {
 			$deleted = $this->apply_removals( $attachment_id, $plan );
 
 			if ( $plan->is_skipped() ) {
-				$this->record_attachment_skip( $attachment_id, $plan );
+				$this->log_planner_skip( $attachment_id, $plan );
 				$this->attachments->finish( $attachment_id, $token, AttachmentState::SKIPPED, $plan->skip_reason() );
 
 				return OptimizeResult::skipped( $plan->skip_reason(), array( 'deleted' => $deleted ) );
@@ -458,16 +458,39 @@ class AttachmentProcessor {
 	 * @param int $attachment_id Attachment ID.
 	 */
 	private function bind_attempt( $attachment_id ) {
-		if ( null === $this->diagnostics ) {
+		try {
+			if ( null === $this->diagnostics || ! $this->diagnostics->is_enabled() ) {
+				return;
+			}
+
+			$row      = $this->attachments->get( $attachment_id );
+			$job_id   = isset( $row['job_id'] ) && is_numeric( $row['job_id'] ) && (int) $row['job_id'] > 0 ? (int) $row['job_id'] : null;
+			$source   = isset( $row['attempt_source'] ) && is_string( $row['attempt_source'] ) && '' !== $row['attempt_source'] ? $row['attempt_source'] : null;
+			$attempts = (int) ( $row['attempts'] ?? 0 );
+
+			$this->diagnostics->set_attempt_context( $job_id, $attempts, $source );
+		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			unset( $throwable );
+		}
+	}
+
+	/**
+	 * Planner skip: one line, not a start. Used by sync and by the queue's plan_and_enqueue.
+	 *
+	 * @param int  $attachment_id Attachment ID.
+	 * @param Plan $plan          Skipped plan.
+	 */
+	public function log_planner_skip( $attachment_id, Plan $plan ) {
+		if ( ! $plan->is_skipped() ) {
 			return;
 		}
 
-		$row      = $this->attachments->get( $attachment_id );
-		$job_id   = isset( $row['job_id'] ) && is_numeric( $row['job_id'] ) && (int) $row['job_id'] > 0 ? (int) $row['job_id'] : null;
-		$source   = isset( $row['attempt_source'] ) && is_string( $row['attempt_source'] ) && '' !== $row['attempt_source'] ? $row['attempt_source'] : null;
-		$attempts = (int) ( $row['attempts'] ?? 0 );
-
-		$this->diagnostics->set_attempt_context( $job_id, $attempts, $source );
+		try {
+			$this->bind_attempt( $attachment_id );
+			$this->record_attachment_skip( $attachment_id, $plan );
+		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			unset( $throwable );
+		}
 	}
 
 	/**
