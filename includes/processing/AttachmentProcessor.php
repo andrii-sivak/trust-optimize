@@ -293,7 +293,7 @@ class AttachmentProcessor {
 			return OptimizeResult::skipped( self::BUSY, array( 'more' => false ) );
 		}
 
-		return $this->convert_claimed( $attachment_id, $token, $budget );
+		return $this->convert_claimed( $attachment_id, $token, $budget, true );
 	}
 
 	/**
@@ -326,12 +326,13 @@ class AttachmentProcessor {
 	 * @param int        $attachment_id Attachment ID.
 	 * @param string     $token         Token of the attempt.
 	 * @param float|null $budget        Time budget in seconds; null uses the filterable default.
+	 * @param bool       $queue_worker  Whether late work must continue through the queue.
 	 * @return OptimizeResult
 	 * @throws Throwable Whatever the conversion threw, after the attempt was ended as failed.
 	 */
-	private function convert_claimed( $attachment_id, $token, $budget ) {
+	private function convert_claimed( $attachment_id, $token, $budget, $queue_worker = false ) {
 		try {
-			return $this->convert_pending( $attachment_id, $token, $budget );
+			return $this->convert_pending( $attachment_id, $token, $budget, $queue_worker );
 		} catch ( Throwable $throwable ) {
 			$this->attachments->finish( $attachment_id, $token, AttachmentState::FAILED, 'exception', $throwable->getMessage() );
 
@@ -345,9 +346,10 @@ class AttachmentProcessor {
 	 * @param int        $attachment_id Attachment ID.
 	 * @param string     $token         Token of the attempt.
 	 * @param float|null $budget        Time budget in seconds; null uses the filterable default.
+	 * @param bool       $queue_worker  Whether late work must continue through the queue.
 	 * @return OptimizeResult
 	 */
-	private function convert_pending( $attachment_id, $token, $budget ) {
+	private function convert_pending( $attachment_id, $token, $budget, $queue_worker ) {
 		$settings       = OptimizationSettings::from_options( $this->settings, $this->capabilities );
 		$deadline       = microtime( true ) + ( null === $budget ? $this->time_budget() : $budget );
 		$this->deadline = $deadline;
@@ -400,7 +402,14 @@ class AttachmentProcessor {
 			$state = AttachmentState::QUEUED;
 		}
 
-		$closed = $this->attachments->finish( $attachment_id, $token, $state, null === $last_err ? null : $this->failure_reason( $attachment_id ), $last_err );
+		$reason = null === $last_err ? null : $this->failure_reason( $attachment_id );
+		$closed = $this->attachments->finish( $attachment_id, $token, $state, $reason, $last_err, $queue_worker );
+
+		// Planning can add rows after the final count. Only the same token may hand that work back to the queue.
+		if ( $queue_worker && ! $closed && AttachmentState::QUEUED !== $state ) {
+			$state  = AttachmentState::QUEUED;
+			$closed = $this->attachments->finish( $attachment_id, $token, $state, $reason, $last_err );
+		}
 
 		// The attempt was taken away: whoever holds the attachment now owns what happens next.
 		if ( ! $closed ) {

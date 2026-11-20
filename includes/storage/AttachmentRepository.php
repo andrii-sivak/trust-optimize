@@ -241,23 +241,35 @@ class AttachmentRepository {
 	 * @param string      $state         Final AttachmentState, never "processing".
 	 * @param string|null $reason        Reason for skipped/failed.
 	 * @param string|null $last_error    Last error message (truncated to 255 characters).
+	 * @param bool        $require_drained Refuse a terminal close while variants are pending.
 	 * @return bool True when this call ended the attempt.
 	 */
-	public function finish( $attachment_id, $token, $state, $reason = null, $last_error = null ) {
+	public function finish( $attachment_id, $token, $state, $reason = null, $last_error = null, $require_drained = false ) {
 		global $wpdb;
 
-		return 1 === (int) $wpdb->query(
-			$wpdb->prepare(
-				"UPDATE {$this->table()} SET state = %s, reason = NULLIF( %s, '' ), last_error = NULLIF( %s, '' ), attempts = 0, attempt_source = NULL, attempt_token = NULL, publishing_at = NULL, updated_at = %s WHERE attachment_id = %d AND state = %s AND attempt_token = %s",
-				$state,
-				(string) $reason,
-				$this->truncate( (string) $last_error ),
-				current_time( 'mysql', true ),
-				(int) $attachment_id,
-				AttachmentState::PROCESSING,
-				$token
-			)
+		$sql = $wpdb->prepare(
+			"UPDATE %i SET state = %s, reason = NULLIF( %s, '' ), last_error = NULLIF( %s, '' ), attempts = 0, attempt_source = NULL, attempt_token = NULL, publishing_at = NULL, updated_at = %s WHERE attachment_id = %d AND state = %s AND attempt_token = %s",
+			$this->table(),
+			$state,
+			(string) $reason,
+			$this->truncate( (string) $last_error ),
+			current_time( 'mysql', true ),
+			(int) $attachment_id,
+			AttachmentState::PROCESSING,
+			$token
 		);
+
+		if ( $require_drained && AttachmentState::QUEUED !== $state ) {
+			$sql .= $wpdb->prepare(
+				' AND NOT EXISTS ( SELECT 1 FROM %i v WHERE v.attachment_id = %d AND v.status = %s )',
+				$this->database->get_plugin_table_names()['variants'],
+				(int) $attachment_id,
+				VariantStatus::PENDING
+			);
+		}
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- Both the base statement and its optional predicate are prepared above.
+		return 1 === (int) $wpdb->query( $sql );
 	}
 
 	/**
@@ -265,14 +277,16 @@ class AttachmentRepository {
 	 *
 	 * An explicit "skipped" state of an attachment without variants is kept. An attachment that a worker
 	 * holds is not changed, and "processing" is never stored for variants alone: only claim() does that.
+	 * A planning caller preserving queue ownership may clear an empty skip through the same guarded write.
 	 *
-	 * @param int $attachment_id Attachment ID.
+	 * @param int  $attachment_id Attachment ID.
+	 * @param bool $preserve_queue Leave scheduling state to the queueing compare-and-set and its owner.
 	 * @return string The resulting state.
 	 */
-	public function recompute( $attachment_id ) {
+	public function recompute( $attachment_id, $preserve_queue = false ) {
 		$state = self::derive_state( $this->variants->count_by_status( $attachment_id ) );
 
-		if ( AttachmentState::NONE === $state && AttachmentState::SKIPPED === $this->get_state( $attachment_id ) ) {
+		if ( ! $preserve_queue && AttachmentState::NONE === $state && AttachmentState::SKIPPED === $this->get_state( $attachment_id ) ) {
 			return AttachmentState::SKIPPED;
 		}
 
@@ -281,7 +295,7 @@ class AttachmentRepository {
 		}
 
 		$this->ensure_row( $attachment_id );
-		$this->write_state( $attachment_id, $state );
+		$this->write_state( $attachment_id, $state, $preserve_queue );
 
 		return $state;
 	}
@@ -381,27 +395,39 @@ class AttachmentRepository {
 	 * A "queued" mark older than a day is treated as lost and may be set again. A "processing" attachment is
 	 * never taken over, and a file that died MAX_ATTEMPTS times is not queued again by anything but an explicit sync.
 	 *
-	 * @param int $attachment_id Attachment ID.
+	 * @param int  $attachment_id Attachment ID.
+	 * @param bool $require_pending Require durable pending variants when planning queues work.
 	 * @return bool True when this call changed the state to "queued".
 	 */
-	public function mark_queued( $attachment_id ) {
+	public function mark_queued( $attachment_id, $require_pending = false ) {
 		global $wpdb;
 
 		$this->ensure_row( $attachment_id );
 
-		return 1 === (int) $wpdb->query(
-			$wpdb->prepare(
-				"UPDATE {$this->table()} SET state = %s, updated_at = %s WHERE attachment_id = %d AND attempts < %d AND (state NOT IN (%s, %s) OR (state = %s AND updated_at < %s))",
-				AttachmentState::QUEUED,
-				current_time( 'mysql', true ),
-				(int) $attachment_id,
-				self::MAX_ATTEMPTS,
-				AttachmentState::QUEUED,
-				AttachmentState::PROCESSING,
-				AttachmentState::QUEUED,
-				gmdate( 'Y-m-d H:i:s', time() - self::STALE_QUEUED_SECONDS )
-			)
+		$sql = $wpdb->prepare(
+			'UPDATE %i SET state = %s, updated_at = %s WHERE attachment_id = %d AND attempts < %d AND (state NOT IN (%s, %s) OR (state = %s AND updated_at < %s))',
+			$this->table(),
+			AttachmentState::QUEUED,
+			current_time( 'mysql', true ),
+			(int) $attachment_id,
+			self::MAX_ATTEMPTS,
+			AttachmentState::QUEUED,
+			AttachmentState::PROCESSING,
+			AttachmentState::QUEUED,
+			gmdate( 'Y-m-d H:i:s', time() - self::STALE_QUEUED_SECONDS )
 		);
+
+		if ( $require_pending ) {
+			$sql .= $wpdb->prepare(
+				' AND EXISTS ( SELECT 1 FROM %i v WHERE v.attachment_id = %d AND v.status = %s )',
+				$this->database->get_plugin_table_names()['variants'],
+				(int) $attachment_id,
+				VariantStatus::PENDING
+			);
+		}
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- Both the base statement and its optional predicate are prepared above.
+		return 1 === (int) $wpdb->query( $sql );
 	}
 
 	/**
@@ -922,17 +948,23 @@ class AttachmentRepository {
 	 *
 	 * @param int    $attachment_id Attachment ID.
 	 * @param string $state         State.
+	 * @param bool   $preserve_queue Whether scheduling state belongs to the queueing caller.
 	 */
-	private function write_state( $attachment_id, $state ) {
+	private function write_state( $attachment_id, $state, $preserve_queue ) {
 		global $wpdb;
 
 		$wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$this->table()} SET state = %s, reason = NULL, last_error = NULL, updated_at = %s WHERE attachment_id = %d AND state <> %s",
+				'UPDATE %i SET state = %s, reason = NULL, last_error = NULL, updated_at = %s WHERE attachment_id = %d AND state <> %s AND ( %d = 0 OR ( state <> %s AND %s <> %s ) )',
+				$this->table(),
 				$state,
 				current_time( 'mysql', true ),
 				(int) $attachment_id,
-				AttachmentState::PROCESSING
+				AttachmentState::PROCESSING,
+				$preserve_queue ? 1 : 0,
+				AttachmentState::QUEUED,
+				$state,
+				AttachmentState::QUEUED
 			)
 		);
 	}

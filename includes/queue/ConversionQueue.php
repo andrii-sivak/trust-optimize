@@ -105,7 +105,7 @@ class ConversionQueue {
 	 * @return array
 	 */
 	public function handle_new_metadata( $metadata, $attachment_id ) {
-		$this->plan_and_enqueue( $attachment_id );
+		$this->plan_and_enqueue( $attachment_id, $metadata );
 
 		return $metadata;
 	}
@@ -113,21 +113,24 @@ class ConversionQueue {
 	/**
 	 * Plan an attachment, remove what is no longer wanted and queue the work that is left.
 	 *
-	 * @param int $attachment_id Attachment ID.
+	 * @param int        $attachment_id Attachment ID.
+	 * @param array|null $metadata      Filter snapshot, or null to read saved metadata.
 	 * @return bool True when work was queued.
 	 */
-	public function plan_and_enqueue( $attachment_id ) {
-		$plan = $this->planner->plan( $attachment_id );
+	public function plan_and_enqueue( $attachment_id, $metadata = null ) {
+		$plan = $this->planner->plan( $attachment_id, false, $metadata );
 		$this->processor->apply_removals( $attachment_id, $plan );
 
 		if ( $plan->has_work() ) {
-			return $this->enqueue( $attachment_id );
+			return $this->enqueue( $attachment_id, true );
 		}
 
 		if ( $plan->is_skipped() ) {
 			$this->processor->log_planner_skip( $attachment_id, $plan );
 		} else {
-			$this->attachments->recompute( $attachment_id );
+			$this->attachments->recompute( $attachment_id, true );
+
+			return $this->enqueue( $attachment_id, true );
 		}
 
 		return false;
@@ -136,11 +139,12 @@ class ConversionQueue {
 	/**
 	 * Queue an attachment unless it is already queued or being processed.
 	 *
-	 * @param int $attachment_id Attachment ID.
+	 * @param int  $attachment_id Attachment ID.
+	 * @param bool $require_pending Require durable pending variants when planning queues work.
 	 * @return bool True when an action was scheduled.
 	 */
-	public function enqueue( $attachment_id ) {
-		if ( ! function_exists( 'as_enqueue_async_action' ) || ! $this->attachments->mark_queued( $attachment_id ) ) {
+	public function enqueue( $attachment_id, $require_pending = false ) {
+		if ( ! function_exists( 'as_enqueue_async_action' ) || ! $this->attachments->mark_queued( $attachment_id, $require_pending ) ) {
 			return false;
 		}
 

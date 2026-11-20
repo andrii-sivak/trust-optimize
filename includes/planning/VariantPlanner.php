@@ -81,15 +81,16 @@ class VariantPlanner {
 	 * Under a claim ($under_claim) the attempt owns the attachment row, so the planner writes no
 	 * attachment state: a skip comes back in the plan and the attempt's closing write stores it.
 	 *
-	 * @param int  $attachment_id Attachment ID.
-	 * @param bool $under_claim   Whether the caller holds the attachment's claim.
+	 * @param int        $attachment_id Attachment ID.
+	 * @param bool       $under_claim   Whether the caller holds the attachment's claim.
+	 * @param array|null $metadata      Filter snapshot, or null to read saved metadata.
 	 * @return Plan
 	 */
-	public function plan( $attachment_id, $under_claim = false ) {
+	public function plan( $attachment_id, $under_claim = false, $metadata = null ) {
 		$attachment_id = (int) $attachment_id;
 		$existing      = $this->variants->get_for_attachment( $attachment_id );
 		$settings      = OptimizationSettings::from_options( $this->settings, $this->capabilities );
-		$source        = $this->eligible_source( $attachment_id );
+		$source        = $this->eligible_source( $attachment_id, $metadata );
 
 		if ( isset( $source['skip'] ) ) {
 			if ( ! $under_claim ) {
@@ -146,8 +147,8 @@ class VariantPlanner {
 		);
 
 		// With work to do the state is set by whoever queues or claims the attachment.
-		if ( ! $under_claim && empty( $pending ) && AttachmentState::SKIPPED === $this->attachments->recompute( $attachment_id ) ) {
-			$this->attachments->set_state( $attachment_id, AttachmentState::NONE );
+		if ( ! $under_claim && empty( $pending ) ) {
+			$this->attachments->recompute( $attachment_id, true );
 		}
 
 		return new Plan( null, $pending, $actions['delete'], $actions['replaced'] );
@@ -356,10 +357,11 @@ class VariantPlanner {
 	/**
 	 * Source data of an attachment, or the reason it is not eligible.
 	 *
-	 * @param int $attachment_id Attachment ID.
+	 * @param int        $attachment_id Attachment ID.
+	 * @param array|null $metadata      Filter snapshot, or null to read saved metadata.
 	 * @return array Eligible source, or skip, width and height when the attachment is not converted.
 	 */
-	private function eligible_source( $attachment_id ) {
+	private function eligible_source( $attachment_id, $metadata ) {
 		$mime = get_post_mime_type( $attachment_id );
 		if ( ! self::is_convertible_mime( $mime ) ) {
 			return array(
@@ -387,7 +389,7 @@ class VariantPlanner {
 			);
 		}
 
-		$metadata = wp_get_attachment_metadata( $attachment_id );
+		$metadata = null === $metadata ? wp_get_attachment_metadata( $attachment_id ) : $metadata;
 		$inspect  = ImageLimits::inspect( $file, $metadata );
 
 		if ( null !== $inspect['reason'] ) {
