@@ -21,11 +21,11 @@ Those files help where the server honors them. Where the server serves `uploads/
 | Site total | 512 MiB | Owner's maximum. A busy site keeps less than 60 days |
 | Age | 60 days | Owner's figure, from file mtime. Not a second, shorter clock |
 
-The full result example in `events.md` encodes to 846 bytes. The same keys with a 100-character size, a 64-character reason, an 80-character editor class, and 64-bit integers encode to 1187 bytes. 1280 sits above that. Required keys are not dropped to squeeze a line in, and a partial JSON line is not written.
+The full result example in `events.md` encodes to 846 bytes. The same keys with a 100-character size, a 64-character reason, an 80-character editor class, and 64-bit integers encode to 1187 bytes. Marking the OOM counter unavailable adds up to 47 bytes. If the extra fields take the line over 1280 bytes, the writer skips the entire line.
 
 The active file is `YYYY-MM-DD.jsonl` in UTC. The first write of a new UTC day leaves yesterday's file closed, so its mtime can age out. When the active file reaches 8 MiB, the writer, holding the lock, renames it and opens a new active file. The new name is `YYYYMMDDTHHMMSS.uuuuuuZ.jsonl`. If that path exists, the writer appends `-2`, `-3`, and so on before the rename. Two rotations in the same second therefore differ. Deny files and `write.lock` do not count toward the cap and are not deleted for age or size.
 
-On every write, after the lock is held, the writer sums `*.jsonl` and deletes whole rotated files, oldest first, until the line it is about to append fits under 512 MiB. It does not delete or rename the active file it has open for this append. It does not run the 60-day delete on that path. If the line still cannot be stored, the write is skipped and the conversion continues.
+On every write, after the lock is held, the writer sums `*.jsonl` and deletes whole non-active files, including closed daily files, oldest first, until the line it is about to append fits under 512 MiB. It does not delete or rename the active file it has open for this append. It does not run the 60-day delete on that path. If the line still cannot be stored, the write is skipped and the conversion continues.
 
 ## Writes
 
@@ -53,8 +53,8 @@ These are the acceptance checks. They do not need the resource gate or a new ima
 
 | Check | What passes |
 | --- | --- |
-| Off | Option absent. Convert the test JPEG. No `to-logs` directory. A subclass that counts cgroup reads and `getrusage` samples stays at zero. Variant status and bytes match a run with the writer not constructed. The settings screen has no diagnostics checkbox |
-| Flag | A missing option and the string `1` write a line. The stored string `0` does not, and age cleanup still deletes an old file. The settings form checkbox is checked when the option is missing and unchecked when it is `0`. Posting `0` and `1` through the registered setting stores those strings. Saving the other settings leaves a stored `0` in place and does not copy the key into `trust_optimize_options` |
+| Off | Stored string `0`. Convert the test JPEG. No new `to-logs` directory or event. A subclass counts zero cgroup and `getrusage` samples. Variant status and bytes match a run with the writer not constructed. Existing files stay and periodic age cleanup continues |
+| Flag | A missing option and the string `1` write a line. The stored string `0` does not, and age cleanup still deletes an old file. The settings form checkbox is checked when the option is missing and unchecked when it is `0`. Posting `0` and `1` through the registered setting stores those strings. A saved `0` survives plugin updates and saving the other settings, and is not copied into `trust_optimize_options` |
 | Budget | After a write, the worker deadline is the same value it had before the write. It is not increased by the writer's duration |
 | Start is early | A test editor's load reads the log. The start line is already complete and contains `conversion_id`. The result line after load repeats that id. Neither the variant row nor any option contains the id |
 | Row match | A `done` or `not_smaller` result from this call matches the variant row's status and reason. `not_pending`, `attempt_lost`, and `row_gone` are logged as the call returned them, and the test does not require the row to show that reason. The writer performs no variant or attachment update |
@@ -65,7 +65,8 @@ These are the acceptance checks. They do not need the resource gate or a new ima
 | Age | A JSONL file with mtime 61 days ago is removed by a direct age-cleanup call. A file one day old remains. The Action Scheduler table gains no `trust-optimize` action from that call |
 | Line | A payload that encodes over 1280 bytes is not appended. The file's last line is still valid JSON. No key is removed from a line that was written |
 | Fields | A `missing_file` result contains the reason code and does not contain a path, a URL, a file name, or a `message` key. The attempt token is absent |
-| Scope | With the cgroup file unreadable, the line has `cgroup` of `unavailable` and no `cgroup_memory_current_bytes`. On the tool container, where `/sys/fs/cgroup/memory.current` is readable, that field is an integer |
+| Scope | Deterministic fixtures verify start and result keep integer `cgroup_memory_current_bytes` and its scope when events are missing or malformed. Valid zero and positive OOM counts remain integers. Missing, invalid, split-line, numeric-prefix and overflowing counters yield `cgroup_oom_kill=unavailable` and `cgroup_oom_reason=not_readable`, with `cgroup_oom_scope=cgroup_counter`. Conversion outcomes are unchanged. Unreadable memory still yields whole-cgroup `unavailable` without memory bytes |
+| Resampling | When memory changes and the OOM counter becomes unavailable during an encode, the start keeps its original memory and integer counter. The result records fresh memory and marks the counter unavailable |
 | Sites | Under multisite, a line for blog 2 is absent from blog 1's `to-logs` |
 | URL | The settings page, a REST status body, and `wp trust-optimize status` contain no `http` URL of `to-logs`. The directory contains `.htaccess`, `web.config`, and `index.php`. The test does not request the URL |
 

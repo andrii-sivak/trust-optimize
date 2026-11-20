@@ -1,5 +1,5 @@
 ---
-title: 'Opt-in conversion diagnostics'
+title: 'Conversion diagnostics'
 type: 'feature'
 created: '2026-11-20'
 status: 'done'
@@ -19,7 +19,7 @@ context:
 
 **Problem:** A killed encoder leaves no local record. The operator cannot tell a finished variant from one that died inside the editor, and the later resource work has no measurements from real sites.
 
-**Approach:** One opt-in JSONL writer per site under `uploads/to-logs`. It records a flushed start line before the editor opens and a result line for what this `convert()` call returned. Default off. No gate, pace, or new memory estimate.
+**Approach:** One JSONL writer per site under `uploads/to-logs`. It records a flushed start line before the editor opens and a result line for what this `convert()` call returned. On by default, with an existing settings checkbox to save off. No gate, pace, or new memory estimate.
 
 ## Boundaries & Constraints
 
@@ -29,7 +29,7 @@ context:
 - `variant_start` is flushed after the source exists and before `get_editor_for_target_mime()`. `variant_result` records this call's status and reason. Match the variant row only when this attempt completed the transition (`done`, `not_smaller`, and `fail()` that updated the row). `not_pending`, `attempt_lost`, and `row_gone` are logged as returned and are not compared to the row. The writer updates no variant or attachment row.
 - `conversion_id` is a fresh 16 random bytes per variant attempt, shared by that start and result, not stored, not an auth token, not a hash of the other fields.
 - Directory is `wp_upload_dir()['basedir'] . '/to-logs'`, with `.htaccess`, `web.config`, and `index.php`. No secret directory. Never emit a URL.
-- Caps: 1280-byte line (skip the whole line if longer), 8 MiB file, 512 MiB site. Size is checked on every write under the lock by deleting oldest rotated files. Age cleanup is at most hourly on `admin_init` for `manage_options` and on uninstall, not on every write. Rotated names are unique within one second.
+- Periodic age cleanup removes logs older than 60 days from the last write. Caps: 1280-byte line (skip the whole line if longer), 8 MiB file, 512 MiB site. Size is checked on every write under the lock by deleting the oldest non-active files. Age cleanup is at most hourly on `admin_init` for `manage_options` and on uninstall. Rotated names are unique within one second.
 - Lock try is non-blocking. If it fails, skip the line. Do not hold the lock across the editor or the encoder. Writer time stays inside the existing deadline at `AttachmentProcessor::convert_pending()`; do not add it back.
 - A recording error is caught inside the writer and does not reach `convert_claimed()`.
 - Uninstall deletes `to-logs` only when `remove_data_on_uninstall` is set and this request drops the site's options, directory first. An early stop that keeps the tables keeps `to-logs`.
@@ -37,7 +37,7 @@ context:
 
 **Never:**
 - Adaptive pace, the AD-11 gate, `ImageLimits` coefficient changes, AVIF speed, Imagick thread pin.
-- A settings checkbox, clear-logs control, new hook, REST field, or WP-CLI command.
+- A new settings screen, clear-logs control, new hook, REST field, or WP-CLI command.
 - Free-text errors, paths, URLs, file names, the attempt token, or `conversion_id` in a table, option, or transient.
 - `fsync`, `sys_getloadavg`, PSI, a watcher process, or treating a missing line as a cause.
 
@@ -45,8 +45,8 @@ context:
 
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
-| Off | Option absent | No `to-logs`. Zero cgroup and CPU samples. Variant matches a run with no writer | N/A |
-| Flag | `update_option( ..., '1', false )` | String `1` writes a line. Integer `1` or `true` may still read back as that type in the same request and stay off. `0`, `yes`, `true`, absent stay off. Settings save does not touch the row | N/A |
+| Off | Stored string `0` | No new directory or event; existing files stay and periodic age cleanup continues. Zero cgroup and CPU samples. Variant matches a run with no writer | N/A |
+| Flag | `update_option( ..., '1', false )` | String `1` writes a line. Integer `1` or `true` may still read back as that type in the same request and stay off. Stored string `0` and other values stay off. An absent option is on. The existing checkbox stores string `1` or `0` in its own row; saving other settings preserves off | N/A |
 | Start early | Test editor `load()` | Start line already on disk with `conversion_id`. Result repeats it. Id absent from rows and options | N/A |
 | Row match | `done` / `not_smaller` / `fail()` that updated the row | Result status and reason match the row | N/A |
 | Unmatched return | `not_pending`, `attempt_lost`, or `row_gone` | Logged as returned. Row need not show that reason. Writer issues no row update | N/A |
@@ -58,6 +58,7 @@ context:
 | Fields | `missing_file` | Reason code present. No path, URL, file name, `message`, or attempt token | N/A |
 | Budget | A write during `convert_pending()` | Deadline value is not increased | N/A |
 | Names | Two rotations in one UTC second | Two different `.jsonl` names | N/A |
+| OOM counter | Readable memory; missing or invalid `memory.events` counter | Start and result retain integer memory and scope; OOM is `unavailable` with reason `not_readable`. Real zero and positive values stay integers. Conversion unchanged | N/A |
 | Sites | Multisite blogs 1 and 2 | Blog 2's line is absent from blog 1's `to-logs` | N/A |
 
 </frozen-after-approval>
@@ -67,9 +68,9 @@ context:
 - `includes/core/Plugin.php` -- construct one diagnostics writer and pass it into `ImageConverter` and `AttachmentProcessor`. Do not `new` it elsewhere.
 - `includes/features/optimization/ImageConverter.php` `convert()` -- start after the source file is known (`wp_filesize` already runs) and before `get_editor_for_target_mime()` near the editor assignment. Result on every return, including `not_pending` before the editor. Do not change transition decisions. `fail()` messages stay out of the log.
 - `includes/processing/AttachmentProcessor.php` `sync()` plan skip and `convert_pending()` -- pass `job_id`, `attempts`, and `attempt_source` from the claimed row once per attachment. Deadline is `microtime( true )` plus the budget; leave that assignment alone.
-- `includes/admin/Settings.php` -- do not add a checkbox or a key in `trust_optimize_options`.
+- `includes/admin/Admin.php` -- the existing checkbox uses its own registered `trust_optimize_diagnostics` setting and hidden `0`/checked `1` inputs; do not add a key in `trust_optimize_options`.
 - `uninstall.php` `trust_optimize_uninstall_site()` -- delete `to-logs` only on the path that drops options, and before `trust_optimize_delete_plugin_options()`. The incomplete-cleanup return keeps the directory.
-- `readme.txt`, `CHANGELOG.md` `## [Unreleased]` -- document the string `update_option` and the residual URL risk. No settings-list checkbox.
+- `readme.txt`, `CHANGELOG.md` `## [Unreleased]` -- document the existing settings checkbox, option values, default-on behavior and residual URL risk.
 - `composer.json` classmap -- run `tools/bin/composer dump-autoload` after adding the class.
 - Reuse `UploadsPath`, `current_time( 'mysql', true )`, and `wp_json_encode`. Do not add a hook.
 
@@ -86,7 +87,9 @@ context:
 - [x] `tools/bin/composer dump-autoload` -- refresh the classmap -- tests fail on a stale map
 
 **Acceptance Criteria:**
-- Given the option is absent, when the test JPEG converts, then no `to-logs` directory exists and the variant matches a run that never constructs the writer.
+- Given the stored string `0`, when the test JPEG converts, then no new `to-logs` directory or event exists, no diagnostic measurements run, and the variant matches a run that never constructs the writer. Existing files stay and periodic age cleanup continues.
+- Given an absent option or string `1`, recording is on and the checkbox is checked. Saving off stores string `0` in its own option and it survives updates and later settings saves.
+- Given readable cgroup memory, both start and result keep integer memory bytes and scope. OOM zero and positive counts remain integers; an unreadable, missing, malformed or overflowing counter yields `unavailable` with reason `not_readable`, and conversion outcomes are unchanged.
 - Given the string `1`, when a variant finishes, then the start line is on disk before the editor loads and the result line repeats its `conversion_id`.
 - Given `not_pending`, `attempt_lost`, or `row_gone`, when the call returns, then the log shows that return and the writer has not updated the row.
 - Given the write lock is held or the directory is unwritable, when a variant converts, then the outcome matches the off run and no exception escapes.

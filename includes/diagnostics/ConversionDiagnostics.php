@@ -1,6 +1,6 @@
 <?php
 /**
- * Opt-in JSONL writer for conversion attempts.
+ * JSONL writer for conversion attempts.
  *
  * @package TrustOptimize
  */
@@ -21,7 +21,7 @@ use TrustOptimize\Value\OptimizeResult;
 /**
  * Class ConversionDiagnostics
  *
- * One writer per site. Recording is off unless get_option returns the string "1".
+ * One writer per site. Recording defaults on; the stored string "0" turns it off.
  * A recording error never leaves this class.
  */
 class ConversionDiagnostics {
@@ -500,9 +500,9 @@ class ConversionDiagnostics {
 	/**
 	 * Cgroup memory.current and oom_kill for this process.
 	 *
-	 * Cached for the process. Unavailable is remembered so a later variant does not retry.
+	 * Cache the directory. If the initial memory sample is unavailable, skip later probes.
 	 *
-	 * @return array{current:int,oom_kill:int}|null
+	 * @return array{current:int,oom_kill:int|null}|null
 	 */
 	protected function sample_cgroup() {
 		if ( false === $this->cgroup_cache ) {
@@ -703,8 +703,11 @@ class ConversionDiagnostics {
 		} else {
 			$payload['cgroup_memory_current_bytes'] = $cgroup['current'];
 			$payload['cgroup_memory_scope']         = 'cgroup_including_neighbours';
-			$payload['cgroup_oom_kill']             = $cgroup['oom_kill'];
+			$payload['cgroup_oom_kill']             = null === $cgroup['oom_kill'] ? 'unavailable' : $cgroup['oom_kill'];
 			$payload['cgroup_oom_scope']            = 'cgroup_counter';
+			if ( null === $cgroup['oom_kill'] ) {
+				$payload['cgroup_oom_reason'] = 'not_readable';
+			}
 		}
 
 		$payload['env'] = $this->current_env_hash();
@@ -1122,7 +1125,7 @@ class ConversionDiagnostics {
 	 *
 	 * @return string|null
 	 */
-	private function cgroup_dir() {
+	protected function cgroup_dir() {
 		$relative = $this->process_cgroup_path();
 		if ( null !== $relative ) {
 			$dir = '/sys/fs/cgroup' . $relative;
@@ -1166,7 +1169,7 @@ class ConversionDiagnostics {
 	 * Current memory and oom_kill from a cgroup directory.
 	 *
 	 * @param string $dir Cgroup directory.
-	 * @return array{current:int,oom_kill:int}|null
+	 * @return array{current:int,oom_kill:int|null}|null
 	 */
 	private function read_cgroup_numbers( $dir ) {
 		$current = $this->read_sysfs( $dir . '/memory.current' );
@@ -1174,10 +1177,20 @@ class ConversionDiagnostics {
 			return null;
 		}
 
-		$oom    = 0;
-		$events = $this->read_sysfs( $dir . '/memory.events' );
-		if ( is_string( $events ) && preg_match( '/^oom_kill\s+(\d+)/m', $events, $match ) ) {
-			$oom = (int) $match[1];
+		$oom = null;
+		try {
+			$events = $this->read_sysfs( $dir . '/memory.events' );
+		} catch ( Throwable $throwable ) {
+			// A host error handler can throw even for a suppressed read warning.
+			$events = null;
+		}
+		if ( is_string( $events ) && preg_match( '/^oom_kill[ \t]+([0-9]+)[ \t]*$/m', $events, $match ) ) {
+			$digits = ltrim( $match[1], '0' );
+			$digits = '' === $digits ? '0' : $digits;
+			// A counter beyond PHP's integer range must not become a saturated value.
+			if ( (string) (int) $digits === $digits ) {
+				$oom = (int) $digits;
+			}
 		}
 
 		return array(

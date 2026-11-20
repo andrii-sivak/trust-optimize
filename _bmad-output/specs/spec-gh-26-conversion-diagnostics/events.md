@@ -38,7 +38,8 @@ Cheap and already in hand, or one syscall that says what it is. These are the on
 | Load and encode time | `wall_load_ms`, `wall_encode_ms` | Process wall clock (`hrtime`) of those two calls. Result only |
 | CPU | `cpu_load_user_ms`, `cpu_load_system_ms`, `cpu_encode_user_ms`, `cpu_encode_system_ms` | `RUSAGE_SELF` of this process. Not the host |
 | PHP memory | `php_bytes`, `php_peak_bytes` | PHP allocator pages (`memory_get_* ( true )`). Peak is since process start. Excludes native encoder allocations |
-| Container memory | `cgroup_memory_current_bytes`, `cgroup_oom_kill` | The process cgroup, including neighbour workers. The counter is the cgroup's, not a count of our deaths |
+| Container memory | `cgroup_memory_current_bytes`, `cgroup_memory_scope` | The process cgroup, including neighbour workers |
+| Container OOM counter | `cgroup_oom_kill`, `cgroup_oom_scope`, `cgroup_oom_reason` | Integer cgroup-wide count or `unavailable` with reason `not_readable`. Scope is `cgroup_counter` |
 | Outcome and output size | `status`, `reason`, `output_bytes` | Status and reason returned by this `convert()` call. They match the row only when this attempt completed the transition. `output_bytes` is the encoded file size when one exists, including a file later discarded as `not_smaller` |
 
 `status` is `done`, `skipped`, or `failed`, the words this `convert()` call returned. `reason` is that call's machine code. Where the attempt completed the transition (`done`, `not_smaller`, and a `fail()` that updated the row), `status` and `reason` match the row afterwards. `not_pending`, `attempt_lost`, and `row_gone` are recorded as returned; the row is not required to agree, because this call did not leave it in that state. The writer does not update the row. The converter's sentence is not a field.
@@ -63,6 +64,8 @@ Cgroup limit files (`memory.max`, swap max, `cpu.max`) are on the environment ev
 ## Honesty
 
 - Do not copy `php_bytes` into a cgroup field. If the cgroup cannot be read, set `cgroup` to `unavailable` and `cgroup_reason` to `not_found` or `not_readable`, and omit the numeric cgroup fields. Cache that result for the process.
+- Read `memory.current` and the OOM counter independently on start and result. When memory is readable, retain integer `cgroup_memory_current_bytes` and `cgroup_memory_scope=cgroup_including_neighbours`. A complete same-line non-negative `oom_kill` integer within the PHP integer range is recorded as an integer, including zero. A missing or unreadable `memory.events`, read exception, missing field, malformed numeric prefix, split-line value, negative value or overflow records `cgroup_oom_kill=unavailable` and `cgroup_oom_reason=not_readable`. `cgroup_oom_scope=cgroup_counter` stays because the counter scope is known. A valid count has no `cgroup_oom_reason`. Conversion outcomes never depend on these reads.
+- Readers of retained JSONL files must accept both integer counts and `unavailable`. Earlier builds could record zero when the counter was unavailable.
 - If `getrusage` is missing, set `cpu` to `unavailable` and omit the CPU numbers.
 - JSON `null` means the phase did not run (encode never started). It is not the same as `unavailable`.
 - A start line with no result line means the result was not recorded. A result with no start means the start was not recorded. A lock that was busy means that line was skipped. None of these means the kernel killed the process. Nothing writes that conclusion into a row, and nothing counts the gaps.
@@ -77,6 +80,14 @@ Start, cgroup readable. Written and flushed before the editor opens. No editor, 
 ```json
 {"v":1,"event":"variant_start","ts":"2026-11-20 12:00:01","blog_id":1,"job_id":14,"attachment_id":6315,"variant_id":88,"attempt":2,"attempt_source":"queue","conversion_id":"c3a1f0e47b2d4a6e8f0192ab34cd56ef","size":"original","format":"avif","source_w":2059,"source_h":1786,"source_bytes":110240,"quality_requested":62,"php_bytes":41943040,"php_peak_bytes":50331648,"php_memory_scope":"php_allocator_pages_excludes_native","cgroup_memory_current_bytes":1072144384,"cgroup_memory_scope":"cgroup_including_neighbours","cgroup_oom_kill":7,"cgroup_oom_scope":"cgroup_counter","env":"a1b2c3d4e5f6"}
 ```
+
+Start, memory readable but the OOM counter unavailable. The same fields apply on result.
+
+```json
+{"cgroup_memory_current_bytes":123456,"cgroup_memory_scope":"cgroup_including_neighbours","cgroup_oom_kill":"unavailable","cgroup_oom_scope":"cgroup_counter","cgroup_oom_reason":"not_readable"}
+```
+
+The preceding object shows only the memory fields of an event.
 
 Start, cgroup not readable.
 
