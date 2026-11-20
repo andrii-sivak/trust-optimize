@@ -8,8 +8,8 @@ scope: 'TrustOptimize plugin as of main 61e8212 (amended for #34; AD-1 exception
 status: final
 created: '2026-11-16'
 updated: '2026-11-20'
-binds: ['#19', '#21', '#22', '#26', '#28', '#29', '#30', '#31', '#32', '#34', '#35']
-sources: ['code at 0943f8c and 61e8212', 'AGENTS.md', 'readme.txt', 'GitHub issues #1-#40', 'owner decisions 2026-11-17', 'owner decisions for #30 2026-11-17 (AD-7, AD-9, AD-10)', 'owner decisions for #34 2026-11-18 (AD-5, AD-8, AD-9, AD-10)', 'owner decision for #19 2026-11-20 (AD-13): occupied target stays failed/target_exists_foreign; skipped, its display and its retry rules are deferred']
+binds: ['#10', '#19', '#21', '#22', '#26', '#28', '#29', '#30', '#31', '#32', '#34', '#35']
+sources: ['code at 0943f8c and 61e8212', 'AGENTS.md', 'readme.txt', 'GitHub issues #1-#40', 'owner decisions 2026-11-17', 'owner decisions for #30 2026-11-17 (AD-7, AD-9, AD-10)', 'owner decisions for #34 2026-11-18 (AD-5, AD-8, AD-9, AD-10)', 'owner decision for #19 2026-11-20 (AD-13): occupied target stays failed/target_exists_foreign; skipped, its display and its retry rules are deferred', 'owner decision for #10 2026-11-20: attached file only; positive metadata trusted; unknown_dimensions keeps done variants under AD-14; too_large deletion unchanged']
 companions: []
 ---
 
@@ -473,3 +473,8 @@ Where the diagnostics writer (AD-18) lives is decided in the #26 spec.
 - **Per-image settings.** Owned by #40, within AD-13 and AD-14.
 - **AVIF encoder speed and AVIF-vs-WebP preference.** Owned by #27, after the measurements in #32.
 - **Showing an occupied target as `skipped`, and when planning retries it.** AD-13 records `failed` / `target_exists_foreign`. The file is kept and the attempt ends normally. Changing that outcome to `skipped`, together with how the result is shown and the retry rules, is a later change. It is not part of #19. When it lands, that writer uses its own reason and joins the AD-8 exclusions in the same change (AD-3).
+- **Dimensions of an intermediate size file.** #10 applies the pixel and memory checks to the attached file only. A size file whose own width and height are missing is still decoded when the attached file passes. Checking each file is the per-variant gate of AD-11, owned by #26 and #32. #10 does not add it.
+- **Positive metadata that is smaller than the file header.** #10 trusts two positive metadata dimensions and reads the header only when they are absent. A smaller lie still bypasses both limits. Not part of #10.
+- **Pending rows a queue worker already holds.** `AttachmentProcessor::run()` does not plan again. #10 stops a new plan from encoding an attachment whose dimensions cannot be established. It does not reclaim actions scheduled before that plan.
+- **A header that understates the decoded bitmap.** The check uses the dimensions the header reports. A decompression bomb is outside it. Memory coefficients stay with #32.
+- **`too_large` and `insufficient_memory` remove existing done variants.** AD-14 does not list those reasons as leaving delivery. That deletion is older than #10 and stays. `unknown_dimensions` keeps a done row and its file only while the existing source-size check says the source is unchanged and the format is still enabled. #10 adds no new way to detect a source change. Bringing the older skip reasons into line with AD-14 is a later change.
