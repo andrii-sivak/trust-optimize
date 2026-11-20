@@ -161,4 +161,24 @@ class InventoryTest extends WP_UnitTestCase {
 		$this->assertSame( 1, $counts['oversized_attachments'] );
 		$this->assertSame( 0, TrustOptimizeInventoryCountingEditor::$loads );
 	}
+
+	public function test_inspect_counts_insufficient_memory_from_a_header() {
+		$id = $this->upload();
+		as_unschedule_all_actions( ConversionQueue::HOOK_PROCESS );
+
+		$sof = "\xFF\xC0" . pack( 'n', 11 ) . "\x08" . pack( 'n', 3000 ) . pack( 'n', 3000 ) . "\x01\x01\x11\x00";
+		file_put_contents( get_attached_file( $id ), "\xFF\xD8" . $sof . "\xFF\xD9" );
+		wp_update_attachment_metadata( $id, array() );
+
+		$old = ini_get( 'memory_limit' );
+		ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 10 * MB_IN_BYTES ) ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed
+
+		try {
+			$counts = Plugin::get_instance()->inventory->inspect( array( $id ) );
+		} finally {
+			ini_set( 'memory_limit', $old ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed
+		}
+
+		$this->assertSame( 1, $counts['oversized_attachments'] );
+	}
 }

@@ -97,7 +97,7 @@ class VariantPlanner {
 			}
 
 			if ( 'unknown_dimensions' === $source ) {
-				$existing = self::unknown_dimensions_deletions( $existing, $settings, $attachment_id );
+				$existing = self::unknown_dimensions_deletions( $existing, $settings );
 			}
 
 			return new Plan( $source, array(), $existing );
@@ -392,23 +392,29 @@ class VariantPlanner {
 	/**
 	 * Rows removed when dimensions cannot be established.
 	 *
-	 * A done variant that still matches this file and whose format is enabled stays:
-	 * the original is not being replaced, only its size is unknown.
+	 * A done variant that still matches its own source file and whose format is enabled stays:
+	 * that source is not being replaced, only the attached file's size is unknown.
 	 *
-	 * @param array[]              $existing      Stored rows.
-	 * @param OptimizationSettings $settings      Current settings.
-	 * @param int                  $attachment_id Attachment ID.
+	 * @param array[]              $existing Stored rows.
+	 * @param OptimizationSettings $settings Current settings.
 	 * @return array[] Rows to delete.
 	 */
-	private static function unknown_dimensions_deletions( array $existing, OptimizationSettings $settings, $attachment_id ) {
-		$file = get_attached_file( $attachment_id );
-		$now  = is_string( $file ) && is_file( $file ) ? (int) wp_filesize( $file ) : 0;
-		$want = array( 'source_file_size' => $now );
+	private static function unknown_dimensions_deletions( array $existing, OptimizationSettings $settings ) {
+		$sizes = array();
+
+		foreach ( $existing as $row ) {
+			$path = $row['source_relative_path'];
+
+			if ( ! isset( $sizes[ $path ] ) ) {
+				$absolute       = UploadsPath::absolute( $path );
+				$sizes[ $path ] = null === $absolute ? 0 : (int) wp_filesize( $absolute );
+			}
+		}
 
 		return array_values(
 			array_filter(
 				$existing,
-				static function ( $row ) use ( $settings, $want ) {
+				static function ( $row ) use ( $settings, $sizes ) {
 					if ( VariantStatus::DONE !== $row['status'] ) {
 						return true;
 					}
@@ -417,7 +423,12 @@ class VariantPlanner {
 						return true;
 					}
 
-					return self::source_changed( $row, $want );
+					return self::source_changed(
+						$row,
+						array(
+							'source_file_size' => $sizes[ $row['source_relative_path'] ],
+						)
+					);
 				}
 			)
 		);

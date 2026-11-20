@@ -118,6 +118,12 @@ class ImageGuardTest extends WP_UnitTestCase {
 		return "\xFF\xD8" . $sof . "\xFF\xD9";
 	}
 
+	private function header_png( $width, $height ) {
+		$data = pack( 'NN', $width, $height ) . "\x08\x02\x00\x00\x00";
+
+		return "\x89PNG\r\n\x1a\n" . pack( 'N', 13 ) . 'IHDR' . $data . pack( 'N', crc32( 'IHDR' . $data ) );
+	}
+
 	private function replace_attached_bytes( $id, $bytes ) {
 		$file = get_attached_file( $id );
 		file_put_contents( $file, $bytes );
@@ -312,6 +318,9 @@ class ImageGuardTest extends WP_UnitTestCase {
 		$this->spy_load();
 
 		$this->assertFalse( Plugin::get_instance()->conversion_queue->plan_and_enqueue( $id ) );
+		$skipped = $this->attachments->get( $id );
+		$this->assertSame( AttachmentState::SKIPPED, $skipped['state'] );
+		$this->assertSame( 'too_large', $skipped['reason'] );
 		$this->assertSame(
 			array(),
 			as_get_scheduled_actions(
@@ -463,25 +472,107 @@ class ImageGuardTest extends WP_UnitTestCase {
 				'source_file_size' => $current,
 			)
 		);
+		$zero = $this->plant_variant(
+			$id,
+			array(
+				'size_name'        => 'large',
+				'format'           => 'webp',
+				'source_file_size' => 0,
+			)
+		);
 		update_option( 'trust_optimize_options', array( 'convert_to_webp' => 1, 'convert_to_avif' => 0, 'webp_quality' => 80 ) );
 		$this->spy_load();
+		$kept_path  = wp_upload_dir()['basedir'] . '/' . $kept['relative_path'];
+		$kept_bytes = file_get_contents( $kept_path );
 
 		$result = Plugin::get_instance()->processor->sync( $id );
 		$rows   = $this->variants->get_for_attachment( $id );
-		$left   = $rows[0];
+		$left   = array_column( $rows, null, 'size_name' );
 
 		$this->assertSame( 'unknown_dimensions', $result->get_message() );
 		$this->assertSame( 0, TrustOptimizeGuardCountingEditor::$loads );
-		$this->assertCount( 1, $rows );
-		$this->assertSame( $kept['relative_path'], $left['relative_path'] );
-		$this->assertSame( VariantStatus::DONE, $left['status'] );
-		$this->assertSame( 1, (int) $left['quality'] );
-		$this->assertSame( $kept['relative_path'], VariantRepository::servable_path( $left ) );
-		$this->assertFileExists( wp_upload_dir()['basedir'] . '/' . $kept['relative_path'] );
+		$this->assertCount( 2, $rows );
+		$this->assertSame( $kept['relative_path'], $left['original']['relative_path'] );
+		$this->assertSame( VariantStatus::DONE, $left['original']['status'] );
+		$this->assertSame( 1, (int) $left['original']['quality'] );
+		$this->assertSame( $kept['relative_path'], VariantRepository::servable_path( $left['original'] ) );
+		$this->assertSame( $kept_bytes, file_get_contents( $kept_path ) );
+		$this->assertSame( 0, (int) $left['large']['source_file_size'] );
+		$this->assertSame( $zero['relative_path'], VariantRepository::servable_path( $left['large'] ) );
+		$this->assertFileExists( wp_upload_dir()['basedir'] . '/' . $zero['relative_path'] );
 		$this->assertFileDoesNotExist( wp_upload_dir()['basedir'] . '/' . $disabled['relative_path'] );
 		$this->assertFileDoesNotExist( wp_upload_dir()['basedir'] . '/' . $changed['relative_path'] );
 		$this->assertSame( AttachmentState::SKIPPED, $this->attachments->get( $id )['state'] );
 		$this->assertSame( 'unknown_dimensions', $this->attachments->get( $id )['reason'] );
+	}
+
+	public function test_unknown_dimensions_keeps_a_done_size_variant_of_another_source_file() {
+		$id         = $this->upload();
+		$attached   = get_post_meta( $id, '_wp_attached_file', true );
+		$size_rel   = dirname( $attached ) . '/size-source.jpg';
+		$size_abs   = wp_upload_dir()['basedir'] . '/' . $size_rel;
+		file_put_contents( $size_abs, str_repeat( 's', 200 ) );
+		$this->replace_attached_bytes( $id, 'not-an-image' );
+		$this->clear_dimensions( $id );
+		$this->assertNotSame( (int) wp_filesize( get_attached_file( $id ) ), (int) wp_filesize( $size_abs ) );
+
+		$kept = $this->plant_variant(
+			$id,
+			array(
+				'size_name'            => 'thumbnail',
+				'format'               => 'webp',
+				'source_relative_path' => $size_rel,
+				'source_file_size'     => (int) wp_filesize( $size_abs ),
+			)
+		);
+		$path  = wp_upload_dir()['basedir'] . '/' . $kept['relative_path'];
+		$bytes = file_get_contents( $path );
+		$this->spy_load();
+
+		$result = Plugin::get_instance()->processor->sync( $id );
+		$rows   = $this->variants->get_for_attachment( $id );
+
+		$this->assertSame( 'unknown_dimensions', $result->get_message() );
+		$this->assertSame( 0, TrustOptimizeGuardCountingEditor::$loads );
+		$this->assertCount( 1, $rows );
+		$this->assertSame( $kept['relative_path'], $rows[0]['relative_path'] );
+		$this->assertSame( $size_rel, $rows[0]['source_relative_path'] );
+		$this->assertSame( $bytes, file_get_contents( $path ) );
+		$this->assertSame( $kept['relative_path'], VariantRepository::servable_path( $rows[0] ) );
+	}
+
+	public function test_a_png_header_over_the_pixel_limit_is_skipped_without_loading() {
+		$id = $this->upload();
+		$this->replace_attached_bytes( $id, $this->header_png( 12000, 12000 ) );
+		$this->clear_dimensions( $id );
+		$this->spy_load();
+
+		$result = Plugin::get_instance()->processor->sync( $id );
+
+		$this->assertSame( 'too_large', $result->get_message() );
+		$this->assertSame( 0, TrustOptimizeGuardCountingEditor::$loads );
+	}
+
+	public function test_one_positive_metadata_side_still_reads_the_header() {
+		$id       = $this->upload();
+		$metadata = wp_get_attachment_metadata( $id );
+		unset( $metadata['height'] );
+		wp_update_attachment_metadata( $id, $metadata );
+
+		$result = Plugin::get_instance()->processor->sync( $id );
+
+		$this->assertTrue( $result->is_success() );
+		$this->assertArrayHasKey( 'width', wp_get_attachment_metadata( $id ) );
+		$this->assertArrayNotHasKey( 'height', wp_get_attachment_metadata( $id ) );
+	}
+
+	public function test_two_positive_metadata_sides_are_trusted_over_the_header() {
+		$id   = $this->upload();
+		$file = $this->replace_attached_bytes( $id, $this->header_jpeg( 12000, 12000 ) );
+		$this->spy_load();
+
+		$this->assertNull( ImageLimits::skip_reason_for_file( $file, array( 'width' => 50, 'height' => 50 ) ) );
+		$this->assertSame( 0, TrustOptimizeGuardCountingEditor::$loads );
 	}
 
 	public function test_a_claim_counts_as_an_attempt_and_a_finished_run_resets_it() {
