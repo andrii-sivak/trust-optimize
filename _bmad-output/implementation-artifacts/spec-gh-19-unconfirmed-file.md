@@ -60,7 +60,7 @@ context:
 
 ## Code Map
 
-- `includes/service/ImageCleanupService.php` — `remove_file()` l.259; the empty-hash hole is the `! empty( $hash )` guard at l.306, after which it deletes. `remove()` l.198 drops the row unless the outcome is `failed`. Callers: `cleanup_attachment()` l.83 (also `delete_attachment`), `cleanup_variants()` l.117, `cleanup_replaced_files()` l.135, `cleanup_managed_records_batch()` l.148.
+- `includes/service/ImageCleanupService.php` — `remove_file()` l.261. After the existing safety checks, `NULL` and `''` return `unconfirmed` at l.308-314. A differing hash stays `hash_mismatch` at l.316. Only a match reaches `wp_delete_file()`. `remove()` drops the row unless the outcome is `failed`. Callers: `cleanup_attachment()` (also `delete_attachment`), `cleanup_variants()`, `cleanup_replaced_files()`, `cleanup_managed_records_batch()`.
 - `includes/processing/AttachmentProcessor.php` l.218-223 — planner delete and replaced snapshots.
 - `includes/planning/VariantPlanner.php` l.271-298 — a `processing` row is neither deleted nor replaced.
 - `includes/bulk/BulkProducer.php` l.429, `includes/api/RestController.php` l.439, `includes/cli/Command.php` l.286 — all call `cleanup_attachment()`.
@@ -84,6 +84,11 @@ context:
 - Given the #30 publication, death, and release tests, when this fix is applied, then they pass without assertion changes.
 
 ## Implementation Notes
+
+- Shipped on `fix/gh-19-unconfirmed-file`: `18e5c88` adds the `NULL` / `''` guard, `bbc206c` corrects the comments, `8772ef1` records the spine decision.
+- The writer outcome stays `failed` / `target_exists_foreign`. `skipped`, its display, and the retry rules stay Deferred on the spine.
+- Accepted limitation, not fixed here: a `done` row with a path and a missing hash is still served until cleanup drops the row. Recorded with reproduction steps in `deferred-work.md`.
+- Checks reported on `18e5c88`: phpcs; unit 8.0 and 8.5 (81 tests, 171 assertions each); integration 8.0 / WordPress 7.0 (455 tests, 1671 assertions, 10 skipped); integration 8.5 / latest (455 tests, 1680 assertions, 9 skipped); multisite group on 8.0 / 7.0 (9 tests, 67 assertions). After `bbc206c`: phpcs; `ImageCleanupServiceTest` 21 tests, 77 assertions; `AttemptSafetyTest|ImageConverterTest|UninstallTest` 52 tests, 251 assertions, 1 skipped.
 
 ## Spec Change Log
 

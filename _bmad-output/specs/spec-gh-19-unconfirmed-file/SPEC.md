@@ -39,6 +39,7 @@ A pain to close before release. A worker reserves `relative_path` when a variant
 - Proving a killed worker's leftover by anything other than the stored hash.
 - Changing `discard_unowned_file()`, which deletes a file the current request just wrote after its row is already gone.
 - Clearing `relative_path` or `file_hash` when an attempt dies.
+- Changing delivery. A `done` row with a path and a missing hash (`NULL` or `''`) is still served until cleanup drops the row. That limitation is recorded in `deferred-work.md` with the reproduction steps.
 
 ## Success signal
 
