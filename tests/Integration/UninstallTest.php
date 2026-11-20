@@ -75,6 +75,7 @@ class UninstallTest extends WP_UnitTestCase {
 			unlink( $file );
 		}
 		@rmdir( wp_upload_dir()['basedir'] . '/' . $this->relative_dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+		$this->delete_logs();
 
 		parent::tear_down();
 	}
@@ -83,6 +84,7 @@ class UninstallTest extends WP_UnitTestCase {
 		update_option( 'trust_optimize_options', array( 'remove_data_on_uninstall' => 0 ) );
 		set_transient( 'trust_optimize_demo', 1, HOUR_IN_SECONDS );
 		$file = $this->add_variant_file( 3001, $this->relative_dir, 'a.jpg.webp' );
+		$this->plant_logs();
 
 		trust_optimize_uninstall_site();
 
@@ -91,6 +93,7 @@ class UninstallTest extends WP_UnitTestCase {
 		$this->assertFileExists( $file );
 		$this->assertTrue( $this->table_exists( 'variants' ) );
 		$this->assertNotFalse( get_option( 'trust_optimize_options' ) );
+		$this->assertDirectoryExists( $this->logs_dir() );
 	}
 
 	public function test_a_partial_cleanup_keeps_the_tables_and_options() {
@@ -99,6 +102,7 @@ class UninstallTest extends WP_UnitTestCase {
 			$this->add_variant_file( 3002, $this->relative_dir, 'b.jpg.webp' ),
 			$this->add_variant_file( 3003, $this->relative_dir, 'c.jpg.webp' ),
 		);
+		$this->plant_logs();
 		add_filter( 'trust_optimize_uninstall_cleanup_max_records', static fn() => 1 );
 
 		trust_optimize_uninstall_site();
@@ -110,6 +114,7 @@ class UninstallTest extends WP_UnitTestCase {
 		$this->assertFileDoesNotExist( $files[0] );
 		$this->assertFileExists( $files[1] );
 		$this->assertFileExists( $files[2] );
+		$this->assertDirectoryExists( $this->logs_dir(), 'An incomplete uninstall keeps to-logs.' );
 	}
 
 	public function test_a_full_pass_removes_files_tables_and_options() {
@@ -117,6 +122,7 @@ class UninstallTest extends WP_UnitTestCase {
 		$this->add_variant_file( 3002, $this->relative_dir, 'b.jpg.webp' );
 		set_transient( 'trust_optimize_demo', 1, HOUR_IN_SECONDS );
 		update_option( 'trust_optimize_bulk_active', 5 );
+		$this->plant_logs();
 
 		trust_optimize_uninstall_site();
 
@@ -129,6 +135,7 @@ class UninstallTest extends WP_UnitTestCase {
 		}
 		wp_cache_flush();
 		$this->assertFalse( get_transient( 'trust_optimize_demo' ) );
+		$this->assertDirectoryDoesNotExist( $this->logs_dir() );
 	}
 
 	public function test_the_original_of_an_attachment_survives_the_uninstall() {
@@ -189,5 +196,50 @@ class UninstallTest extends WP_UnitTestCase {
 		$this->assertFileExists( $outside . '/b.jpg.webp', 'A file outside uploads is never touched.' );
 		$this->assertFalse( $this->table_exists( 'variants' ), 'The registry is dropped: nothing is left that may be deleted.' );
 		$this->assertFalse( get_option( 'trust_optimize_pending_cleanup', false ) );
+	}
+
+	/**
+	 * This site's conversion diagnostics directory.
+	 *
+	 * @return string
+	 */
+	private function logs_dir() {
+		return wp_upload_dir()['basedir'] . '/to-logs';
+	}
+
+	/**
+	 * Put a JSONL file in to-logs so uninstall can keep or delete the directory.
+	 */
+	private function plant_logs() {
+		$dir = $this->logs_dir();
+		wp_mkdir_p( $dir );
+		file_put_contents( $dir . '/keep.jsonl', "{}\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+	}
+
+	/**
+	 * Remove leftover to-logs files from this test.
+	 */
+	private function delete_logs() {
+		$dir = $this->logs_dir();
+		if ( ! file_exists( $dir ) ) {
+			return;
+		}
+		if ( ! is_dir( $dir ) ) {
+			unlink( $dir );
+			return;
+		}
+		$items = scandir( $dir );
+		if ( is_array( $items ) ) {
+			foreach ( $items as $item ) {
+				if ( '.' === $item || '..' === $item ) {
+					continue;
+				}
+				$path = $dir . '/' . $item;
+				if ( is_file( $path ) ) {
+					unlink( $path );
+				}
+			}
+		}
+		@rmdir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
 	}
 }

@@ -123,6 +123,14 @@ On a large network run the removal from the command line, where a web request's 
 
 Sites without the setting "Remove data on uninstall" are left untouched. If `trust_optimize_pending_cleanup` remains on a site afterwards, see "What happens on uninstall?" above.
 
+= How do I record conversion diagnostics? =
+
+Off by default. There is no settings checkbox. To turn it on for the current site:
+
+`update_option( 'trust_optimize_diagnostics', '1', false )`
+
+Only the string `1` enables it. Files are written under `uploads/to-logs` (on a network, that site's uploads folder). The plugin adds `.htaccess`, `web.config` and `index.php` that deny access, and it never prints a URL of those files. A server that serves `uploads/` as static files and ignores those deny files can still expose the directory; that residual risk is accepted. Turn it off by deleting the option. Uninstall with "Remove data on uninstall" deletes `to-logs` only when that request also drops the site's options.
+
 = Settings =
 
 * Serve optimized images (on by default): the `<picture>` delivery.

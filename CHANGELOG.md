@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Opt-in conversion diagnostics. `update_option( 'trust_optimize_diagnostics', '1', false )` writes JSONL start and result lines under `uploads/to-logs` so a worker that dies inside the editor leaves a start line. Off by default; the settings form does not add a checkbox. The plugin writes deny files (`.htaccess`, `web.config`, `index.php`) and never prints a URL; a server that ignores those files can still serve the directory.
 - A worker that died no longer blocks the queue for good. The job health check ends a queue attempt that Action Scheduler confirms dead (no pending or in-progress action, silent for 15 minutes) and queues the attachment again; after three deaths the file is given up as `max_attempts`. It runs on admin page loads, on Resume and in the hourly maintenance task, never on status requests.
 - Attempts that nothing recovers automatically (a synchronous conversion, one that started before the update, a publication that could not finish) are listed in a notice and freed by the new `wp trust-optimize release <id>` command, which first shows the attempt and never touches a file.
 - `queue_signals` (`stuck_claim`, `no_progress`) in the REST and WP-CLI job, a warning in the admin notices and on the Bulk optimization tab, and in `wp trust-optimize resume`.
