@@ -224,6 +224,149 @@ class BulkProducerTest extends WP_UnitTestCase {
 		$this->assertFalse( $this->jobs->create( BulkJob::TYPE_SYNC, array( 'x' => 1 ), 0 ) );
 	}
 
+	public function test_a_reclaim_leaves_a_lock_taken_after_the_stale_check() {
+		$this->plant_mutex( time() - 1000 );
+		$stop = $this->replace_mutex_before_delete( '424242' );
+
+		try {
+			$this->assertFalse( $this->jobs->create( BulkJob::TYPE_SYNC, array( 'x' => 1 ), 0 ) );
+		} finally {
+			$stop();
+		}
+
+		$this->assertSame( '424242', $this->mutex_value() );
+		$this->assertSame( 0, $this->active_job_count() );
+	}
+
+	public function test_two_creates_reclaiming_one_stale_mutex_leave_one_job() {
+		$this->plant_mutex( time() - 1000 );
+
+		$inner  = false;
+		$outer  = false;
+		$armed  = true;
+		$filter = function ( $query ) use ( &$armed, &$inner ) {
+			if ( ! $armed || false === stripos( $query, 'delete' ) || false === strpos( $query, BulkJobRepository::ACTIVE_OPTION ) ) {
+				return $query;
+			}
+
+			$armed = false;
+			$inner = $this->jobs->create( BulkJob::TYPE_SYNC, array( 'x' => 1 ), 0 );
+
+			return $query;
+		};
+		add_filter( 'query', $filter );
+
+		try {
+			$outer = $this->jobs->create( BulkJob::TYPE_SYNC, array( 'x' => 1 ), 0 );
+		} finally {
+			remove_filter( 'query', $filter );
+		}
+
+		$this->assertInstanceOf( BulkJob::class, $inner );
+		$this->assertFalse( $outer );
+		$this->assertSame( 1, $this->active_job_count() );
+		$this->assertSame( (string) $inner->get_id(), $this->mutex_value() );
+	}
+
+	public function test_finishing_a_job_leaves_a_lock_taken_after_the_check() {
+		$job = $this->jobs->create( BulkJob::TYPE_SYNC, array( 'x' => 1 ), 0 );
+		$this->assertInstanceOf( BulkJob::class, $job );
+
+		$stop = $this->replace_mutex_before_delete( '515151' );
+
+		try {
+			$this->assertTrue( $this->jobs->cancel( $job->get_id() ) );
+		} finally {
+			$stop();
+		}
+
+		$this->assertSame( JobStatus::CANCELLED, $this->jobs->get( $job->get_id() )->get_status() );
+		$this->assertSame( '515151', $this->mutex_value() );
+	}
+
+	public function test_a_failed_job_insert_releases_the_captured_timestamp() {
+		global $wpdb;
+
+		$wpdb->suppress_errors( true );
+		$break = static function ( $query ) {
+			return false !== stripos( $query, 'insert' ) && false !== strpos( $query, 'trust_optimize_jobs' )
+				? 'SELECT * FROM trust_optimize_no_such_table'
+				: $query;
+		};
+		add_filter( 'query', $break );
+
+		try {
+			$this->assertFalse( $this->jobs->create( BulkJob::TYPE_SYNC, array( 'x' => 1 ), 0 ) );
+		} finally {
+			remove_filter( 'query', $break );
+			$wpdb->suppress_errors( false );
+		}
+
+		$this->assertNull( $this->mutex_value() );
+		$this->assertSame( 0, $this->active_job_count() );
+	}
+
+	public function test_a_failed_job_insert_leaves_a_replaced_lock() {
+		global $wpdb;
+
+		$captured = null;
+		$deleted  = null;
+		$wpdb->suppress_errors( true );
+		$filter = function ( $query ) use ( &$captured, &$deleted, $wpdb ) {
+			$job_insert   = false !== stripos( $query, 'insert' ) && false !== strpos( $query, 'trust_optimize_jobs' );
+			$mutex_delete = false !== stripos( $query, 'delete' ) && false !== strpos( $query, BulkJobRepository::ACTIVE_OPTION );
+
+			if ( null === $captured && $job_insert ) {
+				$captured = $this->mutex_value();
+				$wpdb->update(
+					$wpdb->options,
+					array( 'option_value' => '616161' ),
+					array( 'option_name' => BulkJobRepository::ACTIVE_OPTION )
+				);
+
+				return 'SELECT * FROM trust_optimize_no_such_table';
+			}
+
+			if ( null === $deleted && $mutex_delete ) {
+				$deleted = $query;
+			}
+
+			return $query;
+		};
+		add_filter( 'query', $filter );
+
+		try {
+			$this->assertFalse( $this->jobs->create( BulkJob::TYPE_SYNC, array( 'x' => 1 ), 0 ) );
+		} finally {
+			remove_filter( 'query', $filter );
+			$wpdb->suppress_errors( false );
+		}
+
+		$this->assertIsString( $captured );
+		$this->assertNotSame( '616161', $captured );
+		$this->assertIsString( $deleted );
+		$this->assertStringContainsString( $captured, $deleted );
+		$this->assertStringNotContainsString( '616161', $deleted );
+		$this->assertSame( '616161', $this->mutex_value() );
+		$this->assertSame( 0, $this->active_job_count() );
+	}
+
+	public function test_a_normal_start_stores_the_job_id_and_finish_clears_it() {
+		$first = $this->jobs->create( BulkJob::TYPE_SYNC, array( 'x' => 1 ), 0 );
+		$this->assertInstanceOf( BulkJob::class, $first );
+		$this->assertSame( (string) $first->get_id(), $this->mutex_value() );
+
+		$this->assertTrue( $this->jobs->cancel( $first->get_id() ) );
+		$this->assertNull( $this->mutex_value() );
+
+		$second = $this->jobs->create( BulkJob::TYPE_SYNC, array( 'x' => 1 ), 0 );
+		$this->assertInstanceOf( BulkJob::class, $second );
+		$this->assertSame( (string) $second->get_id(), $this->mutex_value() );
+
+		$this->assertTrue( $this->jobs->complete( $second->get_id() ) );
+		$this->assertNull( $this->mutex_value() );
+	}
+
 	public function test_deleting_an_attachment_cancels_only_its_own_task() {
 		$a = $this->upload();
 		$b = $this->upload();
@@ -267,6 +410,97 @@ class BulkProducerTest extends WP_UnitTestCase {
 		$next = as_next_scheduled_action( BulkProducer::HOOK_PRODUCE, array( 'job_id' => $job->get_id() ), ConversionQueue::GROUP );
 		$this->assertGreaterThan( time() + BulkProducer::WAIT_SECONDS - 5, $next );
 		$this->assertSame( JobStatus::RUNNING, $this->jobs->get( $job->get_id() )->get_status() );
+	}
+
+	/**
+	 * Store a mutex value directly.
+	 *
+	 * @param string|int $value Holder.
+	 */
+	private function plant_mutex( $value ) {
+		global $wpdb;
+
+		$wpdb->delete( $wpdb->options, array( 'option_name' => BulkJobRepository::ACTIVE_OPTION ) );
+		$wpdb->insert(
+			$wpdb->options,
+			array(
+				'option_name'  => BulkJobRepository::ACTIVE_OPTION,
+				'option_value' => (string) $value,
+				'autoload'     => 'no',
+			)
+		);
+	}
+
+	/**
+	 * Value of the bulk mutex, or null when the row is gone.
+	 *
+	 * @return string|null
+	 */
+	private function mutex_value() {
+		global $wpdb;
+
+		$value = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT option_value FROM {$wpdb->options} WHERE option_name = %s",
+				BulkJobRepository::ACTIVE_OPTION
+			)
+		);
+
+		return null === $value ? null : (string) $value;
+	}
+
+	/**
+	 * Jobs that still own the library.
+	 *
+	 * @return int
+	 */
+	private function active_job_count() {
+		global $wpdb;
+
+		$statuses = JobStatus::active();
+
+		return (int) $wpdb->get_var(
+			$wpdb->prepare(
+				'SELECT COUNT(*) FROM %i WHERE status IN (%s, %s, %s)',
+				$wpdb->prefix . 'trust_optimize_jobs',
+				$statuses[0],
+				$statuses[1],
+				$statuses[2]
+			)
+		);
+	}
+
+	/**
+	 * Before the next delete of the bulk mutex, store a different holder.
+	 *
+	 * The swap runs after this request has already chosen the value it will delete.
+	 *
+	 * @param string $replacement Value the delete must leave in place.
+	 * @return callable Removes the filter.
+	 */
+	private function replace_mutex_before_delete( $replacement ) {
+		global $wpdb;
+
+		$armed  = true;
+		$filter = static function ( $query ) use ( &$armed, $replacement, $wpdb ) {
+			if ( ! $armed || false === stripos( $query, 'delete' ) || false === strpos( $query, BulkJobRepository::ACTIVE_OPTION ) ) {
+				return $query;
+			}
+
+			$armed = false;
+			$wpdb->update(
+				$wpdb->options,
+				array( 'option_value' => $replacement ),
+				array( 'option_name' => BulkJobRepository::ACTIVE_OPTION )
+			);
+
+			return $query;
+		};
+		add_filter( 'query', $filter );
+
+		return static function () use ( $filter ) {
+			remove_filter( 'query', $filter );
+		};
 	}
 
 	/**

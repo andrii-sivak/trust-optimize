@@ -79,7 +79,9 @@ class BulkJobRepository {
 	/**
 	 * Create a new bulk job unless another one owns the library.
 	 *
-	 * Two concurrent calls cannot both succeed: add_option() is atomic (primary key of wp_options).
+	 * Two requests can pass the active-job read together. The mutex row, inserted with
+	 * INSERT IGNORE, is what lets one of them lose. A release removes that row only while
+	 * it still holds the value this call wrote.
 	 *
 	 * @param string $type              Job type.
 	 * @param array  $settings_snapshot Settings the job was created with.
@@ -87,7 +89,13 @@ class BulkJobRepository {
 	 * @return BulkJob|false False when another job is active.
 	 */
 	public function create( $type, array $settings_snapshot = array(), $total = 0 ) {
-		if ( $this->get_active_job() || ! $this->acquire_mutex() ) {
+		if ( $this->get_active_job() ) {
+			return false;
+		}
+
+		$holder = $this->acquire_mutex();
+
+		if ( ! is_string( $holder ) ) {
 			return false;
 		}
 
@@ -107,7 +115,7 @@ class BulkJobRepository {
 		);
 
 		if ( ! $result ) {
-			$this->release_mutex();
+			$this->release_mutex( $holder );
 
 			return false;
 		}
@@ -120,43 +128,50 @@ class BulkJobRepository {
 	/**
 	 * Take the mutex, first removing one that was left behind.
 	 *
-	 * @return bool True when this call owns the mutex.
+	 * @return string|false The option value this call inserted, or false when another owner keeps the row.
 	 */
 	private function acquire_mutex() {
-		if ( $this->insert_mutex() ) {
-			return true;
+		$holder = $this->insert_mutex();
+
+		if ( is_string( $holder ) ) {
+			return $holder;
 		}
 
-		$holder = $this->read_mutex();
+		$observed = $this->read_mutex();
 
 		// A job ID is stale when the job is finished; a timestamp when its request died long ago.
-		$stale = $holder > 1000000000 ? $holder < time() - self::MUTEX_STALE_SECONDS : ! $this->is_active( $this->get( $holder ) );
+		$stale = $observed > 1000000000 ? $observed < time() - self::MUTEX_STALE_SECONDS : ! $this->is_active( $this->get( $observed ) );
 
 		if ( ! $stale ) {
 			return false;
 		}
 
-		$this->release_mutex();
+		// Delete the value just read. The row may already belong to someone else by the time this runs.
+		$this->release_mutex( (string) $observed );
 
 		return $this->insert_mutex();
 	}
 
 	/**
-	 * Insert the mutex row; false when it exists.
+	 * Insert the mutex row.
 	 *
-	 * @return bool
+	 * @return string|false The exact option_value written, or false when the row already exists.
 	 */
 	private function insert_mutex() {
 		global $wpdb;
 
+		$holder = (string) time();
+
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
-		return 1 === (int) $wpdb->query(
+		$inserted = 1 === (int) $wpdb->query(
 			$wpdb->prepare(
 				"INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')",
 				self::ACTIVE_OPTION,
-				(string) time()
+				$holder
 			)
 		);
+
+		return $inserted ? $holder : false;
 	}
 
 	/**
@@ -184,13 +199,23 @@ class BulkJobRepository {
 	}
 
 	/**
-	 * Remove the mutex.
+	 * Remove the mutex while it still holds this value.
+	 *
+	 * A delete that matched only the name would drop a lock a later request had already written.
+	 *
+	 * @param string $holder Value this call observed or wrote.
 	 */
-	private function release_mutex() {
+	private function release_mutex( $holder ) {
 		global $wpdb;
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
-		$wpdb->delete( $wpdb->options, array( 'option_name' => self::ACTIVE_OPTION ) );
+		$wpdb->delete(
+			$wpdb->options,
+			array(
+				'option_name'  => self::ACTIVE_OPTION,
+				'option_value' => (string) $holder,
+			)
+		);
 	}
 
 	/**
@@ -698,8 +723,8 @@ class BulkJobRepository {
 		$data['finished_at']  = current_time( 'mysql', true );
 		$finished             = $this->transition( $job_id, JobStatus::active(), $data );
 
-		if ( $finished && $this->read_mutex() === (int) $job_id ) {
-			$this->release_mutex();
+		if ( $finished ) {
+			$this->release_mutex( (string) (int) $job_id );
 		}
 
 		return $finished;
