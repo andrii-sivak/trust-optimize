@@ -11,6 +11,7 @@ use Throwable;
 use TrustOptimize\Admin\Settings;
 use TrustOptimize\Capabilities\CapabilityService;
 use TrustOptimize\Database\DatabaseManager;
+use TrustOptimize\Diagnostics\ConversionDiagnostics;
 use TrustOptimize\Domain\AttachmentState;
 use TrustOptimize\Domain\VariantStatus;
 use TrustOptimize\Features\Optimization\ImageConverter;
@@ -109,18 +110,33 @@ class AttachmentProcessor {
 	private $database;
 
 	/**
+	 * Conversion diagnostics writer, or null when the processor was built without one.
+	 *
+	 * @var ConversionDiagnostics|null
+	 */
+	private $diagnostics;
+
+	/**
+	 * Deadline of the current convert_pending() run. Set once; never moved for writer time.
+	 *
+	 * @var float
+	 */
+	private $deadline = 0.0;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param AttachmentRepository $attachments  Attachment repository.
-	 * @param VariantRepository    $variants     Variant repository.
-	 * @param ImageConverter       $converter    Image converter.
-	 * @param VariantPlanner       $planner      Variant planner.
-	 * @param ImageCleanupService  $cleanup      Cleanup service.
-	 * @param Settings             $settings     Plugin settings.
-	 * @param CapabilityService    $capabilities Capability service.
-	 * @param DatabaseManager      $database     Database manager.
+	 * @param AttachmentRepository       $attachments  Attachment repository.
+	 * @param VariantRepository          $variants     Variant repository.
+	 * @param ImageConverter             $converter    Image converter.
+	 * @param VariantPlanner             $planner      Variant planner.
+	 * @param ImageCleanupService        $cleanup      Cleanup service.
+	 * @param Settings                   $settings     Plugin settings.
+	 * @param CapabilityService          $capabilities Capability service.
+	 * @param DatabaseManager            $database     Database manager.
+	 * @param ConversionDiagnostics|null $diagnostics  Opt-in diagnostics writer.
 	 */
-	public function __construct( AttachmentRepository $attachments, VariantRepository $variants, ImageConverter $converter, VariantPlanner $planner, ImageCleanupService $cleanup, Settings $settings, CapabilityService $capabilities, DatabaseManager $database ) {
+	public function __construct( AttachmentRepository $attachments, VariantRepository $variants, ImageConverter $converter, VariantPlanner $planner, ImageCleanupService $cleanup, Settings $settings, CapabilityService $capabilities, DatabaseManager $database, ?ConversionDiagnostics $diagnostics = null ) {
 		$this->attachments  = $attachments;
 		$this->variants     = $variants;
 		$this->converter    = $converter;
@@ -129,6 +145,7 @@ class AttachmentProcessor {
 		$this->settings     = $settings;
 		$this->capabilities = $capabilities;
 		$this->database     = $database;
+		$this->diagnostics  = $diagnostics;
 	}
 
 	/**
@@ -163,10 +180,12 @@ class AttachmentProcessor {
 		}
 
 		try {
+			$this->bind_attempt( $attachment_id );
 			$plan    = $this->planner->plan( $attachment_id, true );
 			$deleted = $this->apply_removals( $attachment_id, $plan );
 
 			if ( $plan->is_skipped() ) {
+				$this->log_planner_skip( $attachment_id, $plan );
 				$this->attachments->finish( $attachment_id, $token, AttachmentState::SKIPPED, $plan->skip_reason() );
 
 				return OptimizeResult::skipped( $plan->skip_reason(), array( 'deleted' => $deleted ) );
@@ -329,8 +348,10 @@ class AttachmentProcessor {
 	 * @return OptimizeResult
 	 */
 	private function convert_pending( $attachment_id, $token, $budget ) {
-		$settings = OptimizationSettings::from_options( $this->settings, $this->capabilities );
-		$deadline = microtime( true ) + ( null === $budget ? $this->time_budget() : $budget );
+		$settings       = OptimizationSettings::from_options( $this->settings, $this->capabilities );
+		$deadline       = microtime( true ) + ( null === $budget ? $this->time_budget() : $budget );
+		$this->deadline = $deadline;
+		$this->bind_attempt( $attachment_id );
 		$last_err = null;
 		$more     = false;
 		$handled  = array();
@@ -429,5 +450,60 @@ class AttachmentProcessor {
 	 */
 	private function time_budget() {
 		return max( 0.0, (float) apply_filters( 'trust_optimize_worker_time_budget', self::DEFAULT_TIME_BUDGET ) );
+	}
+
+	/**
+	 * Copy job id, attempt count and source from the claimed attachment row, once per attachment.
+	 *
+	 * @param int $attachment_id Attachment ID.
+	 */
+	private function bind_attempt( $attachment_id ) {
+		try {
+			if ( null === $this->diagnostics || ! $this->diagnostics->is_enabled() ) {
+				return;
+			}
+
+			$row      = $this->attachments->get( $attachment_id );
+			$job_id   = isset( $row['job_id'] ) && is_numeric( $row['job_id'] ) && (int) $row['job_id'] > 0 ? (int) $row['job_id'] : null;
+			$source   = isset( $row['attempt_source'] ) && is_string( $row['attempt_source'] ) && '' !== $row['attempt_source'] ? $row['attempt_source'] : null;
+			$attempts = (int) ( $row['attempts'] ?? 0 );
+
+			$this->diagnostics->set_attempt_context( $job_id, $attempts, $source );
+		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			unset( $throwable );
+		}
+	}
+
+	/**
+	 * Planner skip: one line, not a start. Used by sync and by the queue's plan_and_enqueue.
+	 *
+	 * @param int  $attachment_id Attachment ID.
+	 * @param Plan $plan          Skipped plan.
+	 */
+	public function log_planner_skip( $attachment_id, Plan $plan ) {
+		if ( ! $plan->is_skipped() ) {
+			return;
+		}
+
+		try {
+			$this->bind_attempt( $attachment_id );
+			$this->record_attachment_skip( $attachment_id, $plan );
+		} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			unset( $throwable );
+		}
+	}
+
+	/**
+	 * Planner skip: one line, not a start.
+	 *
+	 * @param int  $attachment_id Attachment ID.
+	 * @param Plan $plan          Skipped plan.
+	 */
+	private function record_attachment_skip( $attachment_id, Plan $plan ) {
+		if ( null === $this->diagnostics ) {
+			return;
+		}
+
+		$this->diagnostics->record_attachment_skip( $attachment_id, (string) $plan->skip_reason(), $plan->skip_width(), $plan->skip_height() );
 	}
 }

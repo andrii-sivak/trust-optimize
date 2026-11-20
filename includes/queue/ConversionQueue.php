@@ -124,7 +124,9 @@ class ConversionQueue {
 			return $this->enqueue( $attachment_id );
 		}
 
-		if ( ! $plan->is_skipped() ) {
+		if ( $plan->is_skipped() ) {
+			$this->processor->log_planner_skip( $attachment_id, $plan );
+		} else {
 			$this->attachments->recompute( $attachment_id );
 		}
 

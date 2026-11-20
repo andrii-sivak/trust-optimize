@@ -76,6 +76,8 @@ function trust_optimize_uninstall_site() {
 		);
 	}
 
+	( new \TrustOptimize\Diagnostics\ConversionDiagnostics( new \TrustOptimize\Admin\Settings() ) )->prune_old_files();
+
 	if ( ! $summary['complete'] ) {
 		update_option(
 			'trust_optimize_pending_cleanup',
@@ -91,6 +93,7 @@ function trust_optimize_uninstall_site() {
 		return;
 	}
 
+	trust_optimize_delete_to_logs();
 	trust_optimize_drop_plugin_tables();
 	trust_optimize_delete_plugin_options();
 }
@@ -178,6 +181,64 @@ function trust_optimize_uninstall_cleanup_generated_files() {
 	$summary['complete']  = 0 === $summary['remaining'];
 
 	return $summary;
+}
+
+/**
+ * Delete this site's conversion diagnostics directory.
+ *
+ * Called only on the uninstall path that also drops options, and before the options go.
+ * If the directory is still there afterwards, the log names to-logs.
+ */
+function trust_optimize_delete_to_logs() {
+	$base = wp_upload_dir();
+	$dir  = ( isset( $base['basedir'] ) && is_string( $base['basedir'] ) && '' !== $base['basedir'] )
+		? untrailingslashit( $base['basedir'] ) . '/to-logs'
+		: '';
+
+	if ( '' === $dir || ! file_exists( $dir ) ) {
+		return;
+	}
+
+	if ( is_link( $dir ) ) {
+		wp_delete_file( $dir );
+	} elseif ( is_dir( $dir ) ) {
+		trust_optimize_delete_tree( $dir );
+	} else {
+		wp_delete_file( $dir );
+	}
+
+	if ( file_exists( $dir ) ) {
+		trust_optimize_uninstall_log( 'TrustOptimize uninstall could not remove to-logs.' );
+	}
+}
+
+/**
+ * Recursively delete a directory of diagnostics files.
+ *
+ * @param string $dir Absolute directory.
+ */
+function trust_optimize_delete_tree( $dir ) {
+	$items = @scandir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+	if ( ! is_array( $items ) ) {
+		return;
+	}
+
+	foreach ( $items as $item ) {
+		if ( '.' === $item || '..' === $item ) {
+			continue;
+		}
+
+		$path = $dir . '/' . $item;
+		if ( is_link( $path ) ) {
+			wp_delete_file( $path );
+		} elseif ( is_dir( $path ) ) {
+			trust_optimize_delete_tree( $path );
+		} else {
+			wp_delete_file( $path );
+		}
+	}
+
+	@rmdir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
 }
 
 /**

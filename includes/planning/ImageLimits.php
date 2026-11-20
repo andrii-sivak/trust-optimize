@@ -75,31 +75,65 @@ final class ImageLimits {
 	 * @return string|null Same values as skip_reason().
 	 */
 	public static function skip_reason_for_file( $file, $metadata ) {
+		return self::inspect( $file, $metadata )['reason'];
+	}
+
+	/**
+	 * Skip reason and the dimensions already used to decide it.
+	 *
+	 * @param string $file     Absolute path of the attached file.
+	 * @param mixed  $metadata Attachment metadata as stored by WordPress.
+	 * @return array{reason:string|null,width:int|null,height:int|null}
+	 */
+	public static function inspect( $file, $metadata ) {
 		$metadata = is_array( $metadata ) ? $metadata : array();
 		$width    = self::positive_side( $metadata['width'] ?? null );
 		$height   = self::positive_side( $metadata['height'] ?? null );
 
 		if ( null !== $width && null !== $height ) {
-			return self::skip_reason( $width, $height );
+			return array(
+				'reason' => self::skip_reason( $width, $height ),
+				'width'  => $width,
+				'height' => $height,
+			);
 		}
 
 		if ( ! is_string( $file ) || '' === $file || ! is_file( $file ) ) {
-			return 'unknown_dimensions';
+			return array(
+				'reason' => 'unknown_dimensions',
+				'width'  => $width,
+				'height' => $height,
+			);
 		}
 
 		$mime = wp_get_image_mime( $file );
 
 		if ( 'image/jpeg' !== $mime && 'image/png' !== $mime ) {
-			return 'unknown_dimensions';
+			return array(
+				'reason' => 'unknown_dimensions',
+				'width'  => $width,
+				'height' => $height,
+			);
 		}
 
 		$size = wp_getimagesize( $file );
 
 		if ( ! is_array( $size ) ) {
-			return 'unknown_dimensions';
+			return array(
+				'reason' => 'unknown_dimensions',
+				'width'  => $width,
+				'height' => $height,
+			);
 		}
 
-		return self::skip_reason( $size[0] ?? 0, $size[1] ?? 0 );
+		$width  = self::positive_side( $size[0] ?? 0 );
+		$height = self::positive_side( $size[1] ?? 0 );
+
+		return array(
+			'reason' => self::skip_reason( $size[0] ?? 0, $size[1] ?? 0 ),
+			'width'  => $width,
+			'height' => $height,
+		);
 	}
 
 	/**

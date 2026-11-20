@@ -21,6 +21,7 @@ use TrustOptimize\Bulk\JobProgress;
 use TrustOptimize\Capabilities\CapabilityService;
 use TrustOptimize\CLI\Command;
 use TrustOptimize\Database\DatabaseManager;
+use TrustOptimize\Diagnostics\ConversionDiagnostics;
 use TrustOptimize\Features\Optimization\ImageConverter;
 use TrustOptimize\Files\AtomicImageWriter;
 use TrustOptimize\Files\FileOwnership;
@@ -139,7 +140,8 @@ class Plugin {
 		$variants     = new VariantRepository( $database );
 		$attachments  = new AttachmentRepository( $database, $variants );
 		$ownership    = new FileOwnership( $variants );
-		$converter    = new ImageConverter( $variants, new AtomicImageWriter( $ownership ), $capabilities, $attachments );
+		$diagnostics  = new ConversionDiagnostics( $settings );
+		$converter    = new ImageConverter( $variants, new AtomicImageWriter( $ownership ), $capabilities, $attachments, $diagnostics );
 		$jobs         = new BulkJobRepository( $database );
 		$eligibility  = new EligibilityQuery( $variants );
 		$progress     = new JobProgress( $attachments, $eligibility );
@@ -148,7 +150,7 @@ class Plugin {
 
 		$this->planner          = new VariantPlanner( $variants, $attachments, $settings, $capabilities );
 		$this->cleanup          = new ImageCleanupService( $variants, $attachments, $ownership );
-		$this->processor        = new AttachmentProcessor( $attachments, $variants, $converter, $this->planner, $this->cleanup, $settings, $capabilities, $database );
+		$this->processor        = new AttachmentProcessor( $attachments, $variants, $converter, $this->planner, $this->cleanup, $settings, $capabilities, $database, $diagnostics );
 		$this->conversion_queue = new ConversionQueue( $attachments, $this->processor, $this->planner, $database );
 		$this->inventory        = new Inventory( $eligibility, $attachments, $variants, $settings, $capabilities );
 		$this->job_health       = new JobHealth( $attachments, $jobs, $this->conversion_queue, $database, $variants );
@@ -161,6 +163,7 @@ class Plugin {
 		foreach ( array(
 			$database,
 			$settings,
+			$diagnostics,
 			$capabilities,
 			$primer,
 			new ImageDelivery( new PictureRenderer( $variants, $urls ), $primer, new SourceResolver( $variants, $urls ), $settings ),

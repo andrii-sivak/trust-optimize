@@ -123,8 +123,13 @@ On a large network run the removal from the command line, where a web request's 
 
 Sites without the setting "Remove data on uninstall" are left untouched. If `trust_optimize_pending_cleanup` remains on a site afterwards, see "What happens on uninstall?" above.
 
+= How do I record conversion diagnostics? =
+
+On by default. Settings has a checkbox, "Keep diagnostic logs". The option is `trust_optimize_diagnostics`, separate from the other settings. A missing option and the stored string `1` are on. The stored string `0` is off, and that off stays after a plugin update. Turning it off stops new diagnostic measurements and new log lines. Files already written stay, and the periodic cleanup still deletes files older than 60 days. The files are under `uploads/to-logs` (on a network, that site's uploads folder), with a total limit of 512 MB; once the limit is reached, older files are deleted sooner. The plugin adds `.htaccess`, `web.config` and `index.php` that deny access, and it never prints a URL of those files. A server that serves `uploads/` as static files and ignores those deny files can still expose the directory; that residual risk is accepted. Uninstall with "Remove data on uninstall" deletes `to-logs` only when that request also drops the site's options.
+
 = Settings =
 
+* Keep diagnostic logs (on by default, including when the option has not been saved yet).
 * Serve optimized images (on by default): the `<picture>` delivery.
 * Create WebP / Create AVIF, and the quality of each (1-100, defaults 85 and 80). A changed quality applies to images converted from then on.
 * Force lazy loading (off by default).

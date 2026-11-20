@@ -7,7 +7,10 @@
 
 namespace TrustOptimize\Features\Optimization;
 
+use stdClass;
+use Throwable;
 use TrustOptimize\Capabilities\CapabilityService;
+use TrustOptimize\Diagnostics\ConversionDiagnostics;
 use TrustOptimize\Domain\VariantStatus;
 use TrustOptimize\Files\AtomicImageWriter;
 use TrustOptimize\Naming\VariantNaming;
@@ -58,18 +61,27 @@ class ImageConverter {
 	private $attachments;
 
 	/**
+	 * Conversion diagnostics writer, or null when the converter was built without one.
+	 *
+	 * @var ConversionDiagnostics|null
+	 */
+	private $diagnostics;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param VariantRepository    $variants     Variant repository.
-	 * @param AtomicImageWriter    $writer       Atomic file writer.
-	 * @param CapabilityService    $capabilities Capability service.
-	 * @param AttachmentRepository $attachments  Attachment repository.
+	 * @param VariantRepository          $variants     Variant repository.
+	 * @param AtomicImageWriter          $writer       Atomic file writer.
+	 * @param CapabilityService          $capabilities Capability service.
+	 * @param AttachmentRepository       $attachments  Attachment repository.
+	 * @param ConversionDiagnostics|null $diagnostics  Opt-in diagnostics writer.
 	 */
-	public function __construct( VariantRepository $variants, AtomicImageWriter $writer, CapabilityService $capabilities, AttachmentRepository $attachments ) {
+	public function __construct( VariantRepository $variants, AtomicImageWriter $writer, CapabilityService $capabilities, AttachmentRepository $attachments, ?ConversionDiagnostics $diagnostics = null ) {
 		$this->variants     = $variants;
 		$this->writer       = $writer;
 		$this->capabilities = $capabilities;
 		$this->attachments  = $attachments;
+		$this->diagnostics  = $diagnostics;
 	}
 
 	/**
@@ -89,6 +101,41 @@ class ImageConverter {
 	 * @return OptimizeResult Success (done), skipped (reason in message; row_gone when the row was removed meanwhile, attempt_lost when the attempt no longer holds the attachment) or failed (reason in message; publish_incomplete when the file may be in place but its row is not done, which leaves the lease held). Data 'lease_kept' when the lease could not be released.
 	 */
 	public function convert( array $variant_row, OptimizationSettings $settings, $token ) {
+		$session = null;
+		if ( null !== $this->diagnostics ) {
+			try {
+				$session = $this->diagnostics->is_enabled()
+					? $this->diagnostics->begin_variant( $variant_row, $settings )
+					: null;
+			} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+				unset( $throwable );
+				$session = null;
+			}
+		}
+
+		$result = $this->convert_variant( $variant_row, $settings, $token, $session );
+
+		if ( $session ) {
+			try {
+				$this->diagnostics->record_result( $session, $result );
+			} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+				unset( $throwable );
+			}
+		}
+
+		return $result;
+	}
+
+	/**
+	 * Convert one pending variant. Recording, when on, flushes a start line before the editor opens.
+	 *
+	 * @param array                $variant_row Row from the variants table.
+	 * @param OptimizationSettings $settings    Current settings (quality).
+	 * @param string               $token       Token of the attempt that holds the attachment.
+	 * @param stdClass|null        $session     Diagnostics session, or null when recording is off.
+	 * @return OptimizeResult
+	 */
+	private function convert_variant( array $variant_row, OptimizationSettings $settings, $token, $session ) {
 		$id            = (int) $variant_row['id'];
 		$attachment_id = (int) $variant_row['attachment_id'];
 		$format        = (string) $variant_row['format'];
@@ -118,7 +165,27 @@ class ImageConverter {
 
 		$source_size = (int) wp_filesize( $source_path );
 		$quality     = $settings->quality_for( $format );
-		$editor      = $this->get_editor_for_target_mime( $source_path, $mime );
+
+		if ( $session ) {
+			try {
+				$this->diagnostics->record_start( $session, $source_size );
+			} catch ( Throwable $throwable ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+				unset( $throwable );
+			}
+		}
+
+		$editor = $this->timed(
+			$session,
+			'load',
+			function () use ( $source_path, $mime ) {
+				return $this->get_editor_for_target_mime( $source_path, $mime );
+			}
+		);
+
+		if ( $session && ! is_wp_error( $editor ) ) {
+			$session->editor           = get_class( $editor );
+			$session->quality_reported = (int) $editor->get_quality();
+		}
 
 		if ( is_wp_error( $editor ) ) {
 			if ( 'trust_optimize_unsupported_target_mime' === $editor->get_error_code() ) {
@@ -134,6 +201,11 @@ class ImageConverter {
 		// requested value while encoding with the old one), so the variant fails before any encode.
 		$quality_set = $editor->set_quality( $quality );
 
+		if ( $session ) {
+			$session->editor           = get_class( $editor );
+			$session->quality_reported = is_wp_error( $quality_set ) ? null : (int) $editor->get_quality();
+		}
+
 		if ( is_wp_error( $quality_set ) ) {
 			return $this->fail( $id, $token, 'quality_failed', $quality_set->get_error_message(), $claimed, $source_size );
 		}
@@ -143,7 +215,20 @@ class ImageConverter {
 			return $this->fail( $id, $token, 'target_exists_foreign', 'Target file exists and is not the TrustOptimize variant its row recorded.', $claimed, $source_size );
 		}
 
-		$saved = null === $target_path ? new \WP_Error( 'target_outside_uploads', 'Invalid target path.' ) : $this->save_with_quality( $editor, $target_path, $mime, $quality );
+		$saved = null === $target_path
+			? new \WP_Error( 'target_outside_uploads', 'Invalid target path.' )
+			: $this->timed(
+				$session,
+				'encode',
+				function () use ( $editor, $target_path, $mime, $quality ) {
+					return $this->save_with_quality( $editor, $target_path, $mime, $quality );
+				}
+			);
+
+		if ( $session && ! is_wp_error( $editor ) ) {
+			$session->editor           = get_class( $editor );
+			$session->quality_reported = (int) $editor->get_quality();
+		}
 
 		if ( is_wp_error( $saved ) ) {
 			return $this->fail( $id, $token, $this->failure_reason( $saved ), $saved->get_error_message(), $claimed, $source_size );
@@ -154,6 +239,13 @@ class ImageConverter {
 		$applied      = (int) $editor->get_quality();
 		$quality_note = $applied === $quality ? null : 'quality_applied:' . $applied;
 		$file_size    = (int) wp_filesize( $saved['path'] );
+
+		if ( $session ) {
+			$session->output_bytes     = $file_size;
+			$session->editor           = get_class( $editor );
+			$session->quality_reported = $applied;
+			$session->result_reason    = $quality_note;
+		}
 
 		if ( $file_size >= $source_size ) {
 			$skipped = $this->variants->transition(
@@ -391,6 +483,22 @@ class ImageConverter {
 			'trust_optimize_unsupported_target_mime',
 			sprintf( 'No available image editor supports target mime type: %s', $target_mime )
 		);
+	}
+
+	/**
+	 * Run a call, recording load or encode duration when a diagnostics session is open.
+	 *
+	 * @param stdClass|null $session Session.
+	 * @param string        $phase   load or encode.
+	 * @param callable      $work    The call.
+	 * @return mixed
+	 */
+	private function timed( $session, $phase, callable $work ) {
+		if ( ! $session ) {
+			return $work();
+		}
+
+		return $this->diagnostics->measure( $session, $phase, $work );
 	}
 
 	/**

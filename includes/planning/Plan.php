@@ -41,18 +41,36 @@ final class Plan {
 	private $replaced;
 
 	/**
+	 * Width used for a skip decision, when the planner already had one.
+	 *
+	 * @var int|null
+	 */
+	private $skip_width;
+
+	/**
+	 * Height used for a skip decision, when the planner already had one.
+	 *
+	 * @var int|null
+	 */
+	private $skip_height;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param string|null $skip_reason Skip reason.
 	 * @param array[]     $pending     Pending rows.
 	 * @param array[]     $to_delete   Rows to delete.
 	 * @param array[]     $replaced    Superseded row snapshots.
+	 * @param int|null    $skip_width  Width used for a skip, or null.
+	 * @param int|null    $skip_height Height used for a skip, or null.
 	 */
-	public function __construct( $skip_reason, array $pending, array $to_delete, array $replaced = array() ) {
+	public function __construct( $skip_reason, array $pending, array $to_delete, array $replaced = array(), $skip_width = null, $skip_height = null ) {
 		$this->skip_reason = $skip_reason;
 		$this->pending     = $pending;
 		$this->to_delete   = $to_delete;
 		$this->replaced    = $replaced;
+		$this->skip_width  = null === $skip_width ? null : (int) $skip_width;
+		$this->skip_height = null === $skip_height ? null : (int) $skip_height;
 	}
 
 	/**
@@ -62,6 +80,24 @@ final class Plan {
 	 */
 	public function skip_reason() {
 		return $this->skip_reason;
+	}
+
+	/**
+	 * Width used for a skip decision.
+	 *
+	 * @return int|null
+	 */
+	public function skip_width() {
+		return $this->skip_width;
+	}
+
+	/**
+	 * Height used for a skip decision.
+	 *
+	 * @return int|null
+	 */
+	public function skip_height() {
+		return $this->skip_height;
 	}
 
 	/**

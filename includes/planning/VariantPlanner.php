@@ -91,16 +91,16 @@ class VariantPlanner {
 		$settings      = OptimizationSettings::from_options( $this->settings, $this->capabilities );
 		$source        = $this->eligible_source( $attachment_id );
 
-		if ( is_string( $source ) ) {
+		if ( isset( $source['skip'] ) ) {
 			if ( ! $under_claim ) {
-				$this->attachments->set_state( $attachment_id, AttachmentState::SKIPPED, $source );
+				$this->attachments->set_state( $attachment_id, AttachmentState::SKIPPED, $source['skip'] );
 			}
 
-			if ( 'unknown_dimensions' === $source ) {
+			if ( 'unknown_dimensions' === $source['skip'] ) {
 				$existing = self::unknown_dimensions_deletions( $existing, $settings );
 			}
 
-			return new Plan( $source, array(), $existing );
+			return new Plan( $source['skip'], array(), $existing, array(), $source['width'], $source['height'] );
 		}
 
 		$desired = self::with_source_sizes( self::desired_variants( $source['relative_path'], $source['metadata'], $settings->enabled_formats(), $source['mime'] ) );
@@ -357,29 +357,45 @@ class VariantPlanner {
 	 * Source data of an attachment, or the reason it is not eligible.
 	 *
 	 * @param int $attachment_id Attachment ID.
-	 * @return array|string Array with relative_path and metadata, or a skip reason.
+	 * @return array Eligible source, or skip, width and height when the attachment is not converted.
 	 */
 	private function eligible_source( $attachment_id ) {
 		$mime = get_post_mime_type( $attachment_id );
 		if ( ! self::is_convertible_mime( $mime ) ) {
-			return 'unsupported_mime';
+			return array(
+				'skip'   => 'unsupported_mime',
+				'width'  => null,
+				'height' => null,
+			);
 		}
 
 		$file = get_attached_file( $attachment_id );
 		if ( ! $file || ! is_file( $file ) ) {
-			return 'missing_file';
+			return array(
+				'skip'   => 'missing_file',
+				'width'  => null,
+				'height' => null,
+			);
 		}
 
 		$relative = UploadsPath::relative( $file );
 		if ( null === $relative ) {
-			return 'outside_uploads';
+			return array(
+				'skip'   => 'outside_uploads',
+				'width'  => null,
+				'height' => null,
+			);
 		}
 
 		$metadata = wp_get_attachment_metadata( $attachment_id );
-		$reason   = ImageLimits::skip_reason_for_file( $file, $metadata );
+		$inspect  = ImageLimits::inspect( $file, $metadata );
 
-		if ( null !== $reason ) {
-			return $reason;
+		if ( null !== $inspect['reason'] ) {
+			return array(
+				'skip'   => $inspect['reason'],
+				'width'  => $inspect['width'],
+				'height' => $inspect['height'],
+			);
 		}
 
 		return array(
