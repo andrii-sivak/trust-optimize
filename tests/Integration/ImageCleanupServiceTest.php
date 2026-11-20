@@ -247,7 +247,7 @@ class ImageCleanupServiceTest extends WP_UnitTestCase {
 		$this->assertSame( array(), $this->variants->get_for_attachment( 1030 ), 'The row is removed: it must not claim the file.' );
 	}
 
-	public function test_a_row_that_reserved_its_path_but_never_finished_is_removed_with_its_file() {
+	public function test_a_row_that_reserved_its_path_but_never_finished_is_removed_without_its_file() {
 		file_put_contents( $this->dir . '/reserved.jpg.webp', 'written before the crash' );
 		$this->variants->upsert(
 			array(
@@ -262,8 +262,117 @@ class ImageCleanupServiceTest extends WP_UnitTestCase {
 
 		$this->cleanup->cleanup_attachment( 1040 );
 
-		$this->assertFileDoesNotExist( $this->dir . '/reserved.jpg.webp', 'The path was reserved by this row, so the file is its own.' );
+		$this->assertFileExists( $this->dir . '/reserved.jpg.webp', 'A reserved path without a hash does not prove the file is ours.' );
+		$this->assertSame( 'written before the crash', file_get_contents( $this->dir . '/reserved.jpg.webp' ) );
 		$this->assertSame( array(), $this->variants->get_for_attachment( 1040 ) );
+	}
+
+	/**
+	 * Put a file on a path a row reserved without recording a hash.
+	 *
+	 * @param int         $attachment_id Attachment the row belongs to.
+	 * @param string      $name          File name inside the test directory.
+	 * @param string      $status        Variant status.
+	 * @param string|null $hash          Hash to store. Null leaves the column NULL. An empty string is stored as empty.
+	 * @return string Absolute path of the file.
+	 */
+	private function unconfirmed( $attachment_id, $name, $status = VariantStatus::PROCESSING, $hash = null ) {
+		$path = $this->dir . '/' . $name;
+		file_put_contents( $path, 'foreign bytes' );
+		$row  = array(
+			'attachment_id'        => $attachment_id,
+			'size_name'            => 'original',
+			'format'               => 'webp',
+			'status'               => $status,
+			'source_relative_path' => $this->relative_dir . '/source.jpg',
+			'relative_path'        => $this->relative_dir . '/' . $name,
+		);
+
+		if ( null !== $hash ) {
+			$row['file_hash'] = $hash;
+		}
+
+		$this->variants->upsert( $row );
+
+		return $path;
+	}
+
+	public function test_cleanup_leaves_a_foreign_file_on_a_path_reserved_without_a_hash() {
+		$path = $this->unconfirmed( 1050, 'foreign-cleanup.jpg.webp' );
+		$this->assertNull( $this->variants->get_for_attachment( 1050 )[0]['file_hash'] );
+
+		$result = $this->cleanup->cleanup_attachment( 1050 );
+
+		$this->assertSame( 'unconfirmed', $result->get_data()['skipped'][0]['reason'] );
+		$this->assertFileExists( $path );
+		$this->assertSame( 'foreign bytes', file_get_contents( $path ) );
+		$this->assertSame( array(), $this->variants->get_for_attachment( 1050 ), 'The row must stop claiming a file it cannot prove it wrote.' );
+	}
+
+	public function test_deleting_the_attachment_leaves_a_foreign_file_on_a_path_reserved_without_a_hash() {
+		$id   = self::factory()->attachment->create_upload_object( DIR_TESTDATA . '/images/canola.jpg' );
+		$path = $this->unconfirmed( $id, 'foreign-delete.jpg.webp' );
+
+		wp_delete_attachment( $id, true );
+
+		$this->assertFileExists( $path );
+		$this->assertSame( 'foreign bytes', file_get_contents( $path ) );
+		$this->assertSame( array(), $this->variants->get_for_attachment( $id ) );
+	}
+
+	public function test_the_uninstall_batch_leaves_a_foreign_file_on_a_path_reserved_without_a_hash() {
+		$path = $this->unconfirmed( 1052, 'foreign-uninstall.jpg.webp' );
+
+		$batch = $this->cleanup->cleanup_managed_records_batch( 1051, 1 );
+
+		$this->assertSame( 1052, $batch['cursor_id'] );
+		$this->assertFileExists( $path );
+		$this->assertSame( 'foreign bytes', file_get_contents( $path ) );
+		$this->assertSame( array(), $this->variants->get_for_attachment( 1052 ) );
+	}
+
+	public function test_a_done_row_without_a_hash_does_not_prove_the_file_is_ours() {
+		$path = $this->unconfirmed( 1053, 'foreign-done.jpg.webp', VariantStatus::DONE );
+
+		$this->cleanup->cleanup_attachment( 1053 );
+
+		$this->assertFileExists( $path );
+		$this->assertSame( 'foreign bytes', file_get_contents( $path ) );
+		$this->assertSame( array(), $this->variants->get_for_attachment( 1053 ) );
+	}
+
+	public function test_cleanup_variants_leaves_a_foreign_file_on_a_path_reserved_without_a_hash() {
+		$path = $this->unconfirmed( 1054, 'foreign-variants.jpg.webp', VariantStatus::FAILED );
+		$rows = $this->variants->get_for_attachment( 1054 );
+
+		$this->cleanup->cleanup_variants( 1054, $rows );
+
+		$this->assertFileExists( $path );
+		$this->assertSame( 'foreign bytes', file_get_contents( $path ) );
+		$this->assertSame( array(), $this->variants->get_for_attachment( 1054 ) );
+	}
+
+	public function test_an_empty_string_hash_does_not_prove_the_file_is_ours() {
+		$path = $this->unconfirmed( 1056, 'foreign-empty-hash.jpg.webp', VariantStatus::PROCESSING, '' );
+		$this->assertSame( '', $this->variants->get_for_attachment( 1056 )[0]['file_hash'] );
+
+		$result = $this->cleanup->cleanup_attachment( 1056 );
+
+		$this->assertSame( 'unconfirmed', $result->get_data()['skipped'][0]['reason'] );
+		$this->assertFileExists( $path );
+		$this->assertSame( 'foreign bytes', file_get_contents( $path ) );
+		$this->assertSame( array(), $this->variants->get_for_attachment( 1056 ) );
+	}
+
+	public function test_replaced_files_cleanup_leaves_a_foreign_file_reserved_without_a_hash() {
+		$path = $this->unconfirmed( 1055, 'foreign-replaced.jpg.webp', VariantStatus::PENDING );
+		$rows = $this->variants->get_for_attachment( 1055 );
+
+		$this->cleanup->cleanup_replaced_files( 1055, $rows );
+
+		$this->assertFileExists( $path );
+		$this->assertSame( 'foreign bytes', file_get_contents( $path ) );
+		$this->assertCount( 1, $this->variants->get_for_attachment( 1055 ), 'Replaced-file cleanup does not remove the row.' );
 	}
 
 	public function test_cleanup_variants_removes_only_the_given_rows() {
@@ -297,6 +406,7 @@ class ImageCleanupServiceTest extends WP_UnitTestCase {
 
 	public function test_deleting_the_attachment_removes_variants_files_and_rows() {
 		$id = self::factory()->attachment->create_upload_object( DIR_TESTDATA . '/images/canola.jpg' );
+		file_put_contents( $this->dir . '/g.jpg.webp', 'x' );
 		$this->variants->upsert(
 			array(
 				'attachment_id'        => $id,
@@ -305,10 +415,9 @@ class ImageCleanupServiceTest extends WP_UnitTestCase {
 				'status'               => VariantStatus::DONE,
 				'source_relative_path' => 'x.jpg',
 				'relative_path'        => $this->relative_dir . '/g.jpg.webp',
+				'file_hash'            => hash( 'sha256', 'x' ),
 			)
 		);
-		file_put_contents( $this->dir . '/g.jpg.webp', 'x' );
-		// The recorded hash is absent, so the file is deleted on the strength of ownership alone.
 
 		wp_delete_attachment( $id, true );
 

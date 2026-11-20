@@ -303,7 +303,15 @@ class ImageCleanupService {
 			);
 		}
 
-		if ( ! empty( $hash ) && hash_file( 'sha256', $path ) !== $hash ) {
+		// A reserved path is not ownership. Only a recorded hash that matches the bytes proves we wrote this file.
+		if ( null === $hash || '' === $hash ) {
+			return array(
+				'status' => 'skipped',
+				'reason' => 'unconfirmed',
+			);
+		}
+
+		if ( hash_file( 'sha256', $path ) !== $hash ) {
 			return array(
 				'status' => 'skipped',
 				'reason' => 'hash_mismatch',
